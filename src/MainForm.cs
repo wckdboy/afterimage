@@ -98,7 +98,11 @@ namespace Afterimage
             preset.SetBounds(312, 213, 144, 30); preset.DropDownStyle = ComboBoxStyle.DropDownList; preset.FlatStyle = FlatStyle.Standard; preset.Items.AddRange(new object[] { "Lean", "Balanced", "Detailed", "Custom" }); preset.AccessibleName = "Recording quality"; Controls.Add(preset);
             displayPicker.SelectedIndexChanged += delegate { if (!updatingOptions && displayPicker.SelectedItem is DisplayChoice d) { settings.Monitor = d.DeviceName; SaveSettings(); } };
             preset.SelectedIndexChanged += delegate {
-                if (updatingOptions || preset.SelectedIndex < 0 || preset.SelectedIndex == 3) return;
+                if (updatingOptions || preset.SelectedIndex < 0) return;
+                if (preset.SelectedIndex == 3) {
+                    using (var form = new SettingsForm(settings)) if (form.ShowDialog(this) == DialogResult.OK) { settings = form.Result; SaveSettings(); RefreshRecent(); }
+                    UpdateOptions(); return;
+                }
                 int i = preset.SelectedIndex; settings.Fps = new[] { 2, 5, 15 }[i]; settings.MaxDimension = new[] { 1280, 1920, 2560 }[i]; settings.Bitrate = new[] { 1000000, 2500000, 5000000 }[i]; SaveSettings(); UpdateFormat();
             };
             record = Theme.Button("Record", 216, true); record.SetBounds(24, 266, 216, 46); Controls.Add(record); record.Click += delegate { ToggleRecording(); };
