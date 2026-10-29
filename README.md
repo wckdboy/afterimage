@@ -8,9 +8,15 @@ The repository contains source and build instructions. Build locally to create `
 
 ## Use
 
-Run `Afterimage.exe`. Name the session, choose a display and quality preset, then press **Record**. Fine-tune capture and storage in **Settings**. **Pause** closes the current clip; resuming starts another. **Mark** adds a workflow marker. **Review** opens the latest completed clips with a clickable activity timeline in your browser. Recent session cards persist across restarts; **View all** opens a searchable library. Older sessions without previews remain usable.
+Run `Afterimage.exe`. A small pill appears at the top center of your selected display. Hover or click to reveal **Record**, **Pause / Resume**, and **Stop**. Move away to collapse it to a status dot and timer. The timer counts recorded time, excluding pauses. The controls do not take keyboard focus from your workflow.
 
-Minimizing hides the app in the system tray. Closing the window during recording also keeps recording in the tray. Use **Stop** or the tray's **Exit** command to finish. Recording is off when the app is first opened unless **Record on app launch** is enabled. The app does not register itself to start with Windows.
+Use **⋯ → Position** for **Left**, **Center**, or **Right**; the position is saved. **⋯ → Open Afterimage** opens the main window, where you can name a session, choose a display and quality, and adjust **Settings**. **⋯ → Sessions** opens the searchable library. **Hide controls** hides the pill; the tray's **Show floating controls** brings it back. Disable **Floating controls** in Settings to use the main window on launch instead.
+
+**Pause** closes the current clip; resuming starts another. **Mark** adds a workflow marker. **Review** opens completed clips with a clickable activity timeline in your browser. Recent session cards persist across restarts; **View all** opens a searchable library. Older sessions without previews remain usable.
+
+Minimizing hides the main window. Closing it leaves the floating controls running, and always preserves an active recording. Use **Stop** to finish a recording or **Exit** in the pill/tray menu to quit. Recording is off when first opened unless **Record on app launch** is enabled. The app does not register itself to start with Windows.
+
+The pill is 136 × 30 logical pixels at rest and 324 × 100 when expanded, with DPI scaling. It follows the selected display and avoids the taskbar. Animation runs only during expansion/collapse. Windows 10 version 2004 and newer exclude the pill and its menus from capture through `WDA_EXCLUDEFROMCAPTURE`; older Windows versions may include the controls. Clicks on the pill and menus are excluded from workflow annotations.
 
 | Shortcut | Action |
 |---|---|
@@ -68,8 +74,10 @@ Install the .NET 10 SDK, then run `powershell -ExecutionPolicy Bypass -File .\bu
 
 `Afterimage.exe --validate C:\path\to\session-folder` decodes completed clips and writes `validation.json` plus first-frame PNGs in that folder. It is an optional diagnostic and may take time on long sessions.
 
+`Afterimage.exe --island-test C:\path\to\test-output` exercises the actual floating buttons and controller with synthetic pixels: hidden-window startup, record/pause/resume/stop, finalized clip decoding, capture-exclusion flags, all three anchors, negative display coordinates, collapse and main-window close behavior. It writes `island-result.json` and rendered control states. Tested at 200% display scaling.
+
 Validation performed during development: actual desktop capture at 1920 × 1200, playback decoding, mouse annotations, manual pause and stop; synthetic automatic rotation, resume, orientation/color, hardware-allowed and software encoding, and free-space protection. Short tests passed. Hardware-allowed desktop capture on this PC showed approximately 1–2% total CPU and 221–229 MB working set with Direct3D capture; values depend on driver, screen content, resolution and settings. The small executable does not imply equally small encoder memory.
 
 API references: [Media Foundation sink writer](https://learn.microsoft.com/en-us/windows/win32/medfound/tutorial--using-the-sink-writer-to-encode-video), [hardware transform option](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-readwrite-enable-hardware-transforms), [image stride](https://learn.microsoft.com/en-us/windows/win32/medfound/image-stride).
 
-Design references: [Arcade recording controls](https://mobbin.com/screens/15fed3f5-ec2e-45f6-bde0-cc53fd949eff) and [Loom video library](https://mobbin.com/screens/f2cf240e-0a9c-4935-ac4a-20c76c231c8d), viewed through Mobbin. These are desktop web references; the implementation uses native Windows controls.
+Design references: [Arcade recording controls](https://mobbin.com/screens/15fed3f5-ec2e-45f6-bde0-cc53fd949eff), [Loom video library](https://mobbin.com/screens/f2cf240e-0a9c-4935-ac4a-20c76c231c8d), and [Riverside recording toolbar](https://mobbin.com/screens/515364d5-121f-45b8-a9dd-13353c69a21a), viewed through Mobbin. These are desktop web references; the floating island follows the requested shape and uses native Windows controls.

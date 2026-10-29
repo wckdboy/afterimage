@@ -28,11 +28,14 @@ namespace Afterimage
         public bool StartOnLaunch { get; set; }
         public string CaptureMode { get; set; } = "auto";
         public string SessionName { get; set; } = "";
+        public bool IslandEnabled { get; set; } = true;
+        public string IslandPosition { get; set; } = "center";
         internal bool TestPattern;
         public Settings() { OutputFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Recordings"); Fps = 5; MaxDimension = 1920; Bitrate = 2500000; SegmentSeconds = 300; MaxStorageGB = 100; MinFreeGB = 2; Cursor = true; Hardware = true; WorkflowEvents = true; }
         internal void Validate()
         {
             if (CaptureMode != "auto" && CaptureMode != "compatibility") CaptureMode = "auto";
+            if (IslandPosition != "left" && IslandPosition != "center" && IslandPosition != "right") IslandPosition = "center";
             SessionName = (SessionName ?? "").Trim(); if (SessionName.Length > 160) SessionName = SessionName.Substring(0, 160);
             if (Fps < 1 || Fps > 30 || MaxDimension < 320 || MaxDimension > 3840 || Bitrate < 250000 || Bitrate > 20000000 || SegmentSeconds < 1 || SegmentSeconds > 3600 || MaxStorageGB < 1 || MinFreeGB < 1)
                 throw new ArgumentException("Recording settings are outside their supported range.");

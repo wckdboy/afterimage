@@ -63,6 +63,9 @@ namespace Afterimage
         private readonly string settingsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.json");
         private Settings settings;
         private Recorder recorder;
+        private IslandForm island;
+        private bool interfaceStarted, stopping;
+        private readonly bool persistSettings;
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly Timer ticker = new Timer { Interval = 1000 };
         private readonly ToolTip tips = new ToolTip();
@@ -87,6 +90,7 @@ namespace Afterimage
             Text = "Afterimage"; Font = new Font("Segoe UI", 10); BackColor = Theme.Paper; ForeColor = Theme.Ink;
             ClientSize = new Size(480, 582); FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
             settings = initial ?? Json.Load(settingsPath);
+            persistSettings = !preview;
             idleIcon = MakeIcon(Theme.Muted); recordingIcon = MakeIcon(Color.FromArgb(218, 56, 77)); pausedIcon = MakeIcon(Color.FromArgb(201, 147, 41)); Icon = idleIcon;
             Label title = Theme.Label("Afterimage", 12, FontStyle.Bold); title.Location = new Point(24, 22); Controls.Add(title);
             state = Theme.Label("Ready", 9, FontStyle.Regular); state.ForeColor = Theme.Muted; state.AutoSize = false; state.TextAlign = ContentAlignment.MiddleRight; state.SetBounds(300, 20, 156, 26); Controls.Add(state);
@@ -120,17 +124,41 @@ namespace Afterimage
             tips.SetToolTip(record, "Ctrl+Alt+R"); tips.SetToolTip(pause, "Ctrl+Alt+P"); tips.SetToolTip(marker, "Mark a workflow step · Ctrl+Alt+M"); tips.SetToolTip(review, "Review completed clips and annotations");
             ContextMenuStrip menu = new ContextMenuStrip(); menu.Items.Add("Open", null, delegate { ShowWindow(); }); menu.Items.Add("Record / stop", null, delegate { ToggleRecording(); }); menu.Items.Add("Pause / resume", null, delegate { TogglePause(); }); menu.Items.Add("Mark", null, delegate { if (recorder != null) recorder.Mark(); }); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add("Exit", null, delegate { ExitApp(); });
             tray.Icon = idleIcon; tray.Text = "Afterimage · ready"; tray.ContextMenuStrip = menu; tray.Visible = !preview; tray.DoubleClick += delegate { ShowWindow(); };
+            menu.Items.Insert(1, new ToolStripMenuItem("Show floating controls", null, delegate { settings.IslandEnabled = true; SaveSettings(); }));
             ticker.Tick += delegate { Tick(); }; ticker.Start(); SystemEvents.SessionSwitch += SessionChanged; SystemEvents.PowerModeChanged += PowerChanged;
-            Shown += delegate {
-                RefreshRecent();
-                if (preview) return;
-                bool r = Win.RegisterHotKey(Handle, 1, 0x4003, (uint)Keys.R), p = Win.RegisterHotKey(Handle, 2, 0x4003, (uint)Keys.P), m = Win.RegisterHotKey(Handle, 3, 0x4003, (uint)Keys.M);
-                if (!r) tips.SetToolTip(record, "Ctrl+Alt+R is in use by another app"); if (!p) tips.SetToolTip(pause, "Ctrl+Alt+P is in use by another app"); if (!m) tips.SetToolTip(marker, "Ctrl+Alt+M is in use by another app");
-                if (settings.StartOnLaunch) BeginRecording();
-            };
+            SystemEvents.DisplaySettingsChanged += DisplaysChanged;
             Resize += delegate { if (WindowState == FormWindowState.Minimized) Hide(); };
             ResumeLayout(true);
         }
+        internal void StartInterface()
+        {
+            _ = Handle;
+            BeginInvoke((Action)(() => {
+                interfaceStarted = true; RefreshRecent();
+                bool r = Win.RegisterHotKey(Handle, 1, 0x4003, (uint)Keys.R), p = Win.RegisterHotKey(Handle, 2, 0x4003, (uint)Keys.P), m = Win.RegisterHotKey(Handle, 3, 0x4003, (uint)Keys.M);
+                if (!r) tips.SetToolTip(record, "Ctrl+Alt+R is in use by another app"); if (!p) tips.SetToolTip(pause, "Ctrl+Alt+P is in use by another app"); if (!m) tips.SetToolTip(marker, "Ctrl+Alt+M is in use by another app");
+                SyncIsland(); if (!settings.IslandEnabled) ShowWindow();
+                if (settings.StartOnLaunch) BeginRecording();
+            }));
+        }
+        private IslandState ReadIslandState()
+        {
+            bool active = recorder != null && recorder.IsAlive;
+            bool busy = active && (stopping || recorder.State == "Starting" || recorder.State == "Stopping");
+            return new IslandState(active, active && (recorder.ManualPaused || recorder.State == "Paused"), busy,
+                active ? stopping ? "Saving" : recorder.State : recorder?.Error != null ? "Error" : recorder != null ? "Saved" : "Afterimage", recorder?.RecordedSeconds ?? 0);
+        }
+        private void SyncIsland()
+        {
+            if (!interfaceStarted || exitRequested) return;
+            if (!settings.IslandEnabled) { island?.Hide(); return; }
+            if (island == null) island = new IslandForm(ReadIslandState, () => settings, BeginRecording, TogglePause, StopRecording, ShowWindow,
+                () => { ShowWindow(); using var library = new LibraryForm(settings.OutputFolder); library.ShowDialog(this); },
+                () => { settings.IslandEnabled = false; SaveSettings(); }, ExitApp,
+                position => { settings.IslandPosition = position; SaveSettings(); });
+            island.Reposition(); island.RefreshState(); if (!island.Visible) island.Show();
+        }
+        private void DisplaysChanged(object sender, EventArgs e) { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)(() => { UpdateOptions(); island?.Reposition(); })); }
         private void UpdateOptions()
         {
             updatingOptions = true; displayPicker.Items.Clear();
@@ -152,20 +180,23 @@ namespace Afterimage
             review.Enabled = latestSession != null;
         }
         private void UpdateFormat() { format.Text = String.Format(System.Globalization.CultureInfo.InvariantCulture, "{0} fps   ·   {1} px   ·   {2:0.#} Mbps{3}", settings.Fps, settings.MaxDimension, settings.Bitrate / 1000000.0, settings.WorkflowEvents ? "   ·   Annotated" : ""); }
-        private void SaveSettings() { try { Json.Save(settingsPath, settings); } catch (Exception e) { ShowError("Could not save settings: " + e.Message); } }
+        private void SaveSettings() { try { if (persistSettings) Json.Save(settingsPath, settings); SyncIsland(); } catch (Exception e) { ShowError("Could not save settings: " + e.Message); } }
         private void BeginRecording()
         {
+            if (recorder != null && recorder.IsAlive || exitRequested) return;
             try {
-                Screen display = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == settings.Monitor) ?? Screen.PrimaryScreen; settings.Monitor = display.DeviceName; settings.SessionName = sessionName.Text; settings.Validate(); Json.Save(settingsPath, settings);
+                Screen display = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == settings.Monitor) ?? Screen.PrimaryScreen; settings.Monitor = display.DeviceName; settings.SessionName = sessionName.Text; settings.Validate(); if (persistSettings) Json.Save(settingsPath, settings);
                 if (settings.WorkflowEvents) InstallMouseHook();
-                recorder = new Recorder(settings, display.Bounds); handledEnd = false; recorder.Start(); SetOptionsEnabled(false); record.Text = "Stop recording"; state.Text = "Starting"; pause.Enabled = true;
+                recorder = new Recorder(settings, display.Bounds); handledEnd = stopping = false; recorder.Start(); SetOptionsEnabled(false); record.Text = "Stop recording"; state.Text = "Starting"; pause.Enabled = true; island?.RefreshState();
                 using (Process p = Process.GetCurrentProcess()) lastCpu = p.TotalProcessorTime; lastCpuAt = DateTime.UtcNow;
             } catch (Exception e) { RemoveHook(); ShowError(e.Message); }
         }
-        private void ToggleRecording() { if (recorder != null && recorder.IsAlive) { recorder.Stop("Stopped by user"); record.Enabled = pause.Enabled = marker.Enabled = false; state.Text = "Saving"; } else BeginRecording(); }
-        private void TogglePause() { if (recorder != null && recorder.IsAlive) recorder.Pause(!recorder.ManualPaused); }
+        private void StopRecording() { if (recorder != null && recorder.IsAlive && !stopping) { stopping = true; recorder.Stop("Stopped by user"); record.Enabled = pause.Enabled = marker.Enabled = false; state.Text = "Saving"; island?.RefreshState(); } }
+        private void ToggleRecording() { if (recorder != null && recorder.IsAlive) StopRecording(); else BeginRecording(); }
+        private void TogglePause() { if (recorder != null && recorder.IsAlive && !stopping) { recorder.Pause(!recorder.ManualPaused); island?.RefreshState(); } }
         private void Tick()
         {
+            island?.RefreshState();
             if (recorder == null) return;
             if (recorder.SessionFolder != null) latestSession = recorder.SessionFolder;
             review.Enabled = latestSession != null && File.Exists(Path.Combine(latestSession, "Review.html"));
@@ -192,7 +223,7 @@ namespace Afterimage
                 try {
                     if (code >= 0 && recorder != null && recorder.EventsEnabled) {
                         int m = message.ToInt32(); string action = m == 0x201 ? "left_click" : m == 0x204 ? "right_click" : m == 0x207 ? "middle_click" : m == 0x20A ? "scroll" : null;
-                        if (action != null) { Win.MouseData d = (Win.MouseData)Marshal.PtrToStructure(data, typeof(Win.MouseData)); recorder.AddClick(action, d.Point.X, d.Point.Y, m == 0x20A ? (short)(d.Data >> 16) : 0); }
+                        if (action != null) { Win.MouseData d = (Win.MouseData)Marshal.PtrToStructure(data, typeof(Win.MouseData)); if (island == null || !island.ContainsControlPoint(new Point(d.Point.X, d.Point.Y))) recorder.AddClick(action, d.Point.X, d.Point.Y, m == 0x20A ? (short)(d.Data >> 16) : 0); }
                     }
                 } catch { }
                 return Win.CallNextHookEx(hook, code, message, data);
@@ -205,13 +236,13 @@ namespace Afterimage
         private void PowerChanged(object sender, PowerModeChangedEventArgs e) { if (recorder != null) { if (e.Mode == PowerModes.Suspend) recorder.SystemPause(true); if (e.Mode == PowerModes.Resume) recorder.SystemPause(false); } }
         private void ShowWindow() { Show(); WindowState = FormWindowState.Normal; Activate(); }
         private void ShowError(string text) { MessageBox.Show(this, text, "Afterimage", MessageBoxButtons.OK, MessageBoxIcon.Information); }
-        private void ExitApp() { exitRequested = true; if (recorder != null && recorder.IsAlive) { recorder.Stop("Application exit"); record.Enabled = pause.Enabled = marker.Enabled = false; } else Close(); }
+        internal void ExitApp() { exitRequested = true; if (recorder != null && recorder.IsAlive) { stopping = true; recorder.Stop("Application exit"); record.Enabled = pause.Enabled = marker.Enabled = false; island?.RefreshState(); } else Close(); }
         protected override void WndProc(ref Message m) { if (m.Msg == 0x312) { if (m.WParam.ToInt32() == 1) ToggleRecording(); if (m.WParam.ToInt32() == 2) TogglePause(); if (m.WParam.ToInt32() == 3 && recorder != null) recorder.Mark(); } if (m.Msg == 0x11 && recorder != null) recorder.Stop("Windows shutdown"); base.WndProc(ref m); }
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (!exitRequested && e.CloseReason == CloseReason.UserClosing && recorder != null && recorder.IsAlive) { e.Cancel = true; Hide(); tray.BalloonTipTitle = "Recording continues"; tray.BalloonTipText = "Use the tray menu to stop or exit."; tray.ShowBalloonTip(3000); return; }
+            if (!exitRequested && e.CloseReason == CloseReason.UserClosing && (settings.IslandEnabled || recorder != null && recorder.IsAlive)) { e.Cancel = true; Hide(); return; }
             if (recorder != null && recorder.IsAlive) { recorder.Stop("Application closing"); recorder.Wait(); }
-            RemoveHook(); ticker.Stop(); tray.Visible = false; tray.Dispose(); SystemEvents.SessionSwitch -= SessionChanged; SystemEvents.PowerModeChanged -= PowerChanged;
+            RemoveHook(); ticker.Stop(); island?.Dispose(); tray.Visible = false; tray.Dispose(); SystemEvents.SessionSwitch -= SessionChanged; SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.DisplaySettingsChanged -= DisplaysChanged;
             for (int i = 1; i <= 3; i++) Win.UnregisterHotKey(Handle, i); base.OnFormClosing(e);
         }
         [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
@@ -222,7 +253,7 @@ namespace Afterimage
         internal Settings Result;
         private readonly ComboBox monitor = new ComboBox(), size = new ComboBox(), bitrate = new ComboBox(), capture = new ComboBox();
         private readonly NumericUpDown fps = new NumericUpDown(), minutes = new NumericUpDown(), limit = new NumericUpDown(), free = new NumericUpDown();
-        private readonly CheckBox cursor = new CheckBox(), annotations = new CheckBox(), titles = new CheckBox(), hardware = new CheckBox(), launch = new CheckBox();
+        private readonly CheckBox cursor = new CheckBox(), annotations = new CheckBox(), titles = new CheckBox(), hardware = new CheckBox(), launch = new CheckBox(), floating = new CheckBox();
         private readonly TextBox folder = new TextBox();
         private int rowIndex;
         internal SettingsForm(Settings config)
@@ -240,10 +271,11 @@ namespace Afterimage
             Check(cursor, "Mouse pointer", config.Cursor); Check(annotations, "Auto annotations", config.WorkflowEvents); Check(titles, "Include window titles", config.WindowTitles); Check(hardware, "Hardware encoding", config.Hardware); Check(launch, "Record on app launch", config.StartOnLaunch);
             titles.Enabled = annotations.Checked; annotations.CheckedChanged += delegate { titles.Enabled = annotations.Checked; };
             Label optionLabel = Theme.Label("Options", 10, FontStyle.Regular); optionLabel.Location = new Point(24, 394); Controls.Add(optionLabel);
-            CheckBox[] checks = { cursor, annotations, titles, hardware, launch }; for (int i = 0; i < checks.Length; i++) { checks[i].Location = new Point(166, 390 + i * 28); Controls.Add(checks[i]); }
+            Check(floating, "Floating controls", config.IslandEnabled);
+            CheckBox[] checks = { cursor, annotations, titles, hardware, launch, floating }; for (int i = 0; i < checks.Length; i++) { checks[i].Location = new Point(166, 390 + i * 28); Controls.Add(checks[i]); }
             Button save = Theme.Button("Save", 100, true); save.SetBounds(384, 569, 100, 36); Controls.Add(save); AcceptButton = save;
             Button cancel = Theme.Link("Cancel"); cancel.SetBounds(288, 571, 86, 32); cancel.DialogResult = DialogResult.Cancel; Controls.Add(cancel); CancelButton = cancel;
-            save.Click += delegate { try { Result = new Settings { CaptureMode = capture.SelectedIndex == 1 ? "compatibility" : "auto", SessionName = config.SessionName, Monitor = ((DisplayItem)monitor.SelectedItem).Screen.DeviceName, Fps = (int)fps.Value, MaxDimension = new int[] { 1280, 1920, 2560, 3840 }[size.SelectedIndex], Bitrate = new int[] { 1000000, 2500000, 5000000, 10000000 }[bitrate.SelectedIndex], SegmentSeconds = (int)minutes.Value * 60, MaxStorageGB = (int)limit.Value, MinFreeGB = (int)free.Value, OutputFolder = folder.Text, Cursor = cursor.Checked, WorkflowEvents = annotations.Checked, WindowTitles = annotations.Checked && titles.Checked, Hardware = hardware.Checked, StartOnLaunch = launch.Checked }; Result.Validate(); DialogResult = DialogResult.OK; } catch (Exception e) { MessageBox.Show(this, e.Message, "Settings"); } };
+            save.Click += delegate { try { Result = new Settings { CaptureMode = capture.SelectedIndex == 1 ? "compatibility" : "auto", SessionName = config.SessionName, IslandEnabled = floating.Checked, IslandPosition = config.IslandPosition, Monitor = ((DisplayItem)monitor.SelectedItem).Screen.DeviceName, Fps = (int)fps.Value, MaxDimension = new int[] { 1280, 1920, 2560, 3840 }[size.SelectedIndex], Bitrate = new int[] { 1000000, 2500000, 5000000, 10000000 }[bitrate.SelectedIndex], SegmentSeconds = (int)minutes.Value * 60, MaxStorageGB = (int)limit.Value, MinFreeGB = (int)free.Value, OutputFolder = folder.Text, Cursor = cursor.Checked, WorkflowEvents = annotations.Checked, WindowTitles = annotations.Checked && titles.Checked, Hardware = hardware.Checked, StartOnLaunch = launch.Checked }; Result.Validate(); DialogResult = DialogResult.OK; } catch (Exception e) { MessageBox.Show(this, e.Message, "Settings"); } };
             ResumeLayout(true);
         }
         private void SetupCombo(ComboBox c) { c.DropDownStyle = ComboBoxStyle.DropDownList; c.Width = 308; c.Margin = new Padding(0, 0, 0, 12); }
