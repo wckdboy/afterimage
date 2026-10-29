@@ -37,20 +37,21 @@ namespace Afterimage
                     island.SetExpanded(false); await Task.Delay(90); Snapshot(island, output, "transition");
                     island.SetExpanded(false); await Task.Delay(50); island.SetExpanded(true);
                     await Until(() => !island.IsAnimating && island.Expansion == 1);
-                    Button record = Button(island, "Record"), pause = Button(island, "Pause"), stop = Button(island, "Stop");
-                    Check(record.Visible && record.Enabled && !pause.Enabled && !stop.Enabled, "Idle controls are incorrect.");
+                    Button record = Button(island, "Record"), pause = Button(island, "Chat"), stop = Button(island, "Notes");
+                    Check(record.Visible && record.Enabled && pause.Enabled && stop.Enabled, "Idle controls are incorrect.");
                     var hitPoint = record.PointToScreen(new Point(record.Width / 2, record.Height / 2));
                     Check(WindowFromPoint(hitPoint) == record.Handle, "The native Record button cannot receive pointer input.");
                     Snapshot(island, output, "expanded");
                     foreach (float scale in new[] { 1f, 1.25f, 1.5f, 2f }) { using var raster = island.SnapshotAtScale(scale); Check(raster.GetPixel(0, 0).A == 0, "Scaling introduced an opaque corner."); raster.Save(Path.Combine(output, "scale-" + (int)(scale * 100) + ".png"), ImageFormat.Png); }
                     record.PerformClick(); await Until(() => island.AccessibleDescription.StartsWith("Recording")); await Task.Delay(1100);
-                    Check(!record.Enabled && pause.Enabled && stop.Enabled, "Recording controls are incorrect.");
+                    Check(record.Enabled && record.Text == "Mark" && pause.Enabled && stop.Enabled, "Recording controls are incorrect.");
+                    record.PerformClick(); Check(island.AccessibleDescription.StartsWith("Marked"), "Marker feedback was delayed.");
                     Snapshot(island, output, "recording");
-                    pause.PerformClick(); await Until(() => island.AccessibleDescription.StartsWith("Paused"));
+                    pause.PerformClick(); await Until(() => main.RecordingState == "Paused");
                     Check(pause.Text == "Resume", "Pause did not expose Resume."); Snapshot(island, output, "paused");
                     pause.PerformClick(); await Until(() => island.AccessibleDescription.StartsWith("Recording")); await Task.Delay(1000);
                     stop.PerformClick(); await Until(() => island.AccessibleDescription.StartsWith("Saved"));
-                    Check(record.Enabled && !pause.Enabled && !stop.Enabled, "Stopped controls are incorrect.");
+                    Check(record.Enabled && pause.Text == "Chat" && stop.Text == "Notes", "Stopped controls are incorrect.");
                     foreach (string position in new[] { "left", "center", "right" }) {
                         settings.IslandPosition = position; island.Reposition(); var area = Screen.PrimaryScreen.WorkingArea;
                         Check(area.Contains(island.Bounds), "Controls exceed the display at " + position);
@@ -58,7 +59,7 @@ namespace Afterimage
                     var negative = new Rectangle(-1920, -200, 1920, 1080); var size = new Size(324, 100);
                     foreach (string position in new[] { "left", "center", "right" }) Check(negative.Contains(new Rectangle(IslandForm.AnchorPoint(negative, size, position, 18, 8), size)), "Negative display coordinates failed.");
                     settings.IslandPosition = "center"; island.SetExpanded(false); await Until(() => !island.IsAnimating && island.Expansion == 0);
-                    Check(island.Width == (int)Math.Ceiling(148 * island.DeviceDpi / 96f), "Controls did not collapse.");
+                    Check(island.Width == (int)Math.Ceiling(68 * island.DeviceDpi / 96f), "Controls did not collapse.");
                     main.Show(); main.Close(); Check(!main.Visible && !main.IsDisposed && island.Visible, "Closing the library stopped the island.");
                     var sessions = SessionLibrary.Read(output); Check(sessions.Count == 1 && sessions[0].Clips == 2, "Pause/resume did not finalize two clips.");
                     Check(Validation.Run(sessions[0].Folder) == 0, "Recorded clips failed to decode.");

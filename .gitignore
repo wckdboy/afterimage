@@ -1,5 +1,7 @@
 # Local preferences and secrets
 /settings.json
+/workspace.json
+/ai-connection.json
 /.env
 /.env.*
 !.env.example

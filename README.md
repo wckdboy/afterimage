@@ -1,6 +1,8 @@
 # Afterimage
 
-A portable Windows screen recorder for documenting workflows, reviewing steps, and preparing automation training data. Native Windows Forms UI on .NET 10, Direct3D desktop capture, and Windows H.264 encoding. No browser engine, background service, account, or cloud upload.
+A small Windows workspace for recording workflows, keeping notes, and chatting with AI. Native Windows Forms UI on .NET 10, Direct3D desktop capture, and Windows H.264 encoding. No browser engine or background service. Recording and notes work offline; AI is optional.
+
+![Afterimage logo](assets/afterimage.svg)
 
 ## Repository
 
@@ -8,21 +10,36 @@ The repository contains source and build instructions. Build locally to create `
 
 ## Use
 
-Run `Afterimage.exe`. A small pill appears at the top center of your selected display. Hover or click to reveal **Record**, **Pause / Resume**, and **Stop**. Move away to collapse it to a status dot and timer. The timer counts recorded time, excluding pauses. The controls do not take keyboard focus from your workflow.
+Run `Afterimage.exe`. A small island appears at the top center of your selected display. At rest it shows only the logo and a status light, with no wordmark. Hover to reveal **Record**, **Chat**, and **Notes**. While recording, these become **Mark**, **Pause / Resume**, and **Stop**. A timer appears only during recording; **AI** appears while a reply is being generated. The timer excludes pauses. The island does not take keyboard focus from your workflow.
 
-Use **⋯ → Position** for **Left**, **Center**, or **Right**; the position is saved. **⋯ → Open Afterimage** opens the main window, where you can name a session, choose a display and quality, and adjust **Settings**. **⋯ → Sessions** opens the searchable library. **Hide controls** hides the pill; the tray's **Show floating controls** brings it back. Disable **Floating controls** in Settings to use the main window on launch instead.
+Use **⋯ → Position** for **Left**, **Center**, or **Right**; the position is saved. **⋯ → Recording settings** opens the main recorder window. **⋯ → Sessions** opens the searchable library. **Chat** and **Notes** remain available in this menu during recording. **Hide controls** hides the island; the tray's **Show floating controls** brings it back. Disable **Floating controls** in Settings to use the main window on launch instead.
 
 **Pause** closes the current clip; resuming starts another. **Mark** adds a workflow marker. **Review** opens completed clips with a clickable activity timeline in your browser. Recent session cards persist across restarts; **View all** opens a searchable library. Older sessions without previews remain usable.
 
 Minimizing hides the main window. Closing it leaves the floating controls running, and always preserves an active recording. Use **Stop** to finish a recording or **Exit** in the pill/tray menu to quit. Recording is off when first opened unless **Record on app launch** is enabled. The app does not register itself to start with Windows.
 
-The pill is 136 × 30 logical pixels at rest and 324 × 100 when expanded, plus a six-pixel transparent shadow margin, with DPI scaling. It follows the selected display and avoids the taskbar. Its translucent glass surface uses a supersampled alpha bitmap instead of a hard-edged window region. A damped spring preserves motion when hover reverses; labels and controls fade with the shape. Drawing buffers are reused and animation stops at rest. Expansion respects the Windows client-animation preference. Windows 10 version 2004 and newer exclude the pill and its menus from capture through `WDA_EXCLUDEFROMCAPTURE`; older Windows versions may include the controls. Clicks on the pill and menus are excluded from workflow annotations.
+The island is **56 × 26 logical pixels** at rest and 324 × 100 when expanded, plus a six-pixel transparent shadow margin. It grows only for recording time or AI activity. It follows the selected display and avoids the taskbar. Its glass surface uses supersampled alpha blending. A faster damped spring preserves motion when hover reverses; controls become usable before the animation finishes. Drawing buffers are reused, display bounds are cached, and animation stops at rest. Recording status updates every 100 ms without repeating disk checks. Expansion respects the Windows client-animation preference. Windows 10 version 2004 and newer exclude the island and menus from capture through `WDA_EXCLUDEFROMCAPTURE`; older Windows versions may include the controls. Clicks on the island and menus are excluded from workflow annotations.
 
 | Shortcut | Action |
 |---|---|
 | Ctrl+Alt+R | Record / stop |
 | Ctrl+Alt+P | Pause / resume |
 | Ctrl+Alt+M | Mark a workflow step |
+| Ctrl+Alt+Space | Open chat |
+
+## Chat and notes
+
+Open **Chat → Connect**. The default is **Local · Ollama**, at `http://localhost:11434`. Start Ollama with a model already installed, select **Find models**, choose a model, and save. Afterimage does not install or download models. Local model memory and GPU use are separate from the recorder and depend on the chosen model.
+
+Optional connections: **OpenAI** uses the Responses API; **Compatible API** uses a `/v1`-style base URL and streaming Chat Completions. Enter your own key and model. Model discovery is asynchronous; a model name can also be entered manually. Remote servers require HTTPS; HTTP is allowed only on loopback. API keys are protected using Windows DPAPI for your account, never saved as plaintext or copied to a changed endpoint. API use may incur the provider's charges.
+
+Replies stream into the panel. **Stop** cancels the request; recording controls remain responsive. Enter sends; Shift+Enter adds a line. Closing the panel hides it and lets a running reply finish, with an **AI** indicator on the island. **New chat** clears the current conversation; **Export** saves a text copy. Launching Afterimage again opens the existing workspace instead of leaving a hidden duplicate dialog.
+
+**Attach** lets you pick a `clip-*.annotations.json` file and review the exact text before attaching it. Only the selected text and chat history are sent to the selected model when you press Send. Attachments are capped at 180 events / approximately 18,000 characters, with a visible truncation note. Video, screenshots, recordings folders, and notes are never attached automatically. This is text-based workflow assistance, not video understanding or autonomous computer control. The AI cannot start recordings, execute code, or operate other apps.
+
+**Notes** autosave locally. **Use in chat** copies the selection (or the note) into the composer for review. **Mark selection** adds up to 240 characters as a named recording marker while recording is active. Notes and chat survive app restarts. **Export** saves the current note as text.
+
+Workspace data and connection settings live in `%LOCALAPPDATA%\Afterimage\workspace.json` and `ai-connection.json`. Notes and chats are ordinary local text data; API keys alone are encrypted. Recording preferences and recordings retain their existing paths. The AI panel and normal windows can appear in a recording, just like other apps; only the floating island and its menus are excluded.
 
 ## Settings
 
@@ -32,7 +49,7 @@ Recording stops at the configured folder limit (100 GB by default), or when free
 
 At 2.5 Mbps the target is about 1.13 decimal GB/hour; actual files can be smaller. The live CPU/RAM indicator reports this process's resource use. Hardware encoding is allowed when available, not guaranteed. Disable it if your graphics driver has problems.
 
-Auto annotations include observed foreground app names, mouse clicks, scrolling, and manually marked steps. Window titles are optional and off by default. These are event labels, not AI interpretations of the workflow. No microphone, system audio, typed text, network calls, or uploads are implemented. Screen pixels still contain whatever is visible; pause capture when appropriate.
+Auto annotations include observed foreground app names, mouse clicks, scrolling, and manually marked steps. Window titles are optional and off by default. These are event labels, not AI interpretations of the workflow. Recording does not capture microphone/system audio or log typed keys. It makes no network requests. AI requests occur only when you explicitly find models or send a chat message. Screen pixels still contain whatever is visible.
 
 ## Files
 
@@ -64,7 +81,7 @@ Pauses contain no screen captures and start new clips on resume. Long encoding s
 
 One display per session. Automatic capture uses Vortice Direct3D11/DXGI 3.8.3 and Windows Desktop Duplication. Vortice MediaFoundation 3.8.3 provides typed encoder bindings. Versions and dependency hashes are locked. Capture uses one reusable staging texture with CPU readback and scaling; it is not a zero-copy GPU pipeline. Unsupported/rotated displays, capture errors, and pointer-disabled recording use the GDI compatibility path. You can select Compatibility explicitly. HDR fidelity and device-loss recovery have not been validated. GPU-protected surfaces and secure desktops cannot be recorded normally. Lock, disconnect and suspend events pause recording; a display layout change stops the session. A crash or power loss may leave the current `.partial.mp4` unreadable; previously finalized clips are preserved. Use shorter clips to reduce that exposure. The app does not claim crash recovery or unattended multi-day certification.
 
-The executable is unsigned. Source is included for inspection and rebuilding.
+The executable is unsigned. Source is included for inspection and rebuilding. `Afterimage.exe --quit` asks the running instance to finish its recording, save the workspace and exit; wait for that process to exit before replacing app files.
 
 ## Build and verify
 
@@ -76,8 +93,12 @@ Install the .NET 10 SDK, then run `powershell -ExecutionPolicy Bypass -File .\bu
 
 `Afterimage.exe --island-test C:\path\to\test-output` exercises the floating buttons and controller with synthetic pixels: hidden-window startup, native pointer hit testing, record/pause/resume/stop, finalized clip decoding, capture-exclusion flags, all three anchors, negative display coordinates, collapse and main-window close behavior. It also checks alpha edges, idle repainting, spring reversal and refresh-rate independence. It writes `island-result.json`, rendered control states at 100–200% scaling, and actual animation frames with timestamps. Native window/control tests were run at 200% display scaling.
 
+`Afterimage.exe --assistant-test C:\path\to\test-output` checks protocol parsing with fragmented UTF-8, Ollama/OpenAI/compatible streaming fixtures, cancellation, failed/truncated responses, model discovery, explicit context limits, DPAPI, ordered atomic writes, single-instance messages, responsive UI during streaming, DPI layout, and note/chat persistence. It renders the actual panel for review. It uses synthetic replies and sends no requests to a real AI provider. Run it under your normal Windows account, since restricted service accounts may not have a usable DPAPI profile.
+
 Validation performed during development: actual desktop capture at 1920 × 1200, playback decoding, mouse annotations, manual pause and stop; synthetic automatic rotation, resume, orientation/color, hardware-allowed and software encoding, and free-space protection. Short tests passed. Hardware-allowed desktop capture on this PC showed approximately 1–2% total CPU and 221–229 MB working set with Direct3D capture; values depend on driver, screen content, resolution and settings. The small executable does not imply equally small encoder memory.
 
-API references: [Media Foundation sink writer](https://learn.microsoft.com/en-us/windows/win32/medfound/tutorial--using-the-sink-writer-to-encode-video), [hardware transform option](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-readwrite-enable-hardware-transforms), [image stride](https://learn.microsoft.com/en-us/windows/win32/medfound/image-stride), [layered-window composition](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features#layered-windows).
+API references: [Media Foundation sink writer](https://learn.microsoft.com/en-us/windows/win32/medfound/tutorial--using-the-sink-writer-to-encode-video), [hardware transform option](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-readwrite-enable-hardware-transforms), [image stride](https://learn.microsoft.com/en-us/windows/win32/medfound/image-stride), [layered-window composition](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features#layered-windows), [Ollama chat](https://docs.ollama.com/api/chat), [Ollama models](https://docs.ollama.com/api/tags), [OpenAI streaming](https://developers.openai.com/api/docs/guides/streaming-responses).
 
 Design references: [Arcade recording controls](https://mobbin.com/screens/15fed3f5-ec2e-45f6-bde0-cc53fd949eff), [Loom video library](https://mobbin.com/screens/f2cf240e-0a9c-4935-ac4a-20c76c231c8d), and [Riverside recording toolbar](https://mobbin.com/screens/515364d5-121f-45b8-a9dd-13353c69a21a), viewed through Mobbin. These are desktop web references; the floating island follows the requested shape and uses native Windows controls.
+
+The companion panel keeps conversation content above a persistent composer, informed by the desktop web chat screens from [Attio](https://mobbin.com/screens/3fd10268-cb96-42b2-8886-0ab9dcf50793) and [Searchable](https://mobbin.com/screens/77132c86-87b3-4223-a05b-3c14af96d3d2), viewed through Mobbin. Afterimage retains its own dark palette and native controls.

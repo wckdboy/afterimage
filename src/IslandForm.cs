@@ -8,7 +8,7 @@ using System.Windows.Forms;
 
 namespace Afterimage
 {
-    internal readonly record struct IslandState(bool Active, bool Paused, bool Busy, string Status, double Seconds);
+    internal readonly record struct IslandState(bool Active, bool Paused, bool Busy, string Status, double Seconds, string Activity = "");
 
     // One alpha surface; native child buttons retain hit testing and accessibility.
     internal sealed class IslandForm : Form
@@ -17,7 +17,7 @@ namespace Afterimage
         private static readonly Color Dim = Color.FromArgb(168, 174, 189);
         private readonly Func<IslandState> readState;
         private readonly Func<Settings> readSettings;
-        private readonly Timer animation = new Timer { Interval = 8 }, leave = new Timer { Interval = 400 };
+        private readonly Timer animation = new Timer { Interval = 8 }, leave = new Timer { Interval = 180 };
         private readonly Stopwatch motion = new Stopwatch();
         private readonly LayeredSurface surface = new LayeredSurface();
         private readonly Font textFont = new Font("Segoe UI", 12, FontStyle.Regular, GraphicsUnit.Pixel), timerFont = new Font("Segoe UI", 13, FontStyle.Regular, GraphicsUnit.Pixel);
@@ -26,24 +26,28 @@ namespace Afterimage
         private readonly ToolTip tips = new ToolTip();
         private IslandState state;
         private bool expanded, menuOpen, drawing;
-        private float expansion, velocity;
+        private float expansion, velocity, restExpansion, restVelocity;
         private double lastFrame;
         private Size canvasSize;
+        private Rectangle displayArea;
         internal bool IsAnimating => animation.Enabled;
         internal float Expansion => expansion;
         internal int PresentCount { get; private set; }
         private float ScaleFactor => DeviceDpi / 96f;
-        private RectangleF Body => new RectangleF(Inset, Inset, 136 + 188 * expansion, 30 + 70 * expansion);
-        internal IslandForm(Func<IslandState> readState, Func<Settings> readSettings, Action start, Action togglePause, Action finish, Action open, Action library, Action hide, Action exit, Action<string> setPosition)
+        private float RestWidth => state.Active ? (state.Activity.Length > 0 ? 138 : 114) : state.Activity.Length > 0 ? 84 : 56;
+        private RectangleF Body { get { float width = 56 + 82 * restExpansion; return new RectangleF(Inset, Inset, width + (324 - width) * expansion, 26 + 74 * expansion); } }
+        internal IslandForm(Func<IslandState> readState, Func<Settings> readSettings, Action start, Action togglePause, Action finish, Action open, Action library, Action hide, Action exit, Action<string> setPosition, Action mark = null, Action<string> workspace = null)
         {
             this.readState = readState; this.readSettings = readSettings;
             AutoScaleMode = AutoScaleMode.None; FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; TopMost = true;
             StartPosition = FormStartPosition.Manual; Text = "Afterimage controls"; AccessibleName = "Afterimage floating recording controls"; Font = new Font("Segoe UI", 9);
-            record = AddButton("Record", "record", start); pause = AddButton("Pause", "pause", togglePause); stop = AddButton("Stop", "stop", finish);
+            record = AddButton("Record", "record", () => { if (state.Active) mark?.Invoke(); else start(); });
+            pause = AddButton("Chat", "chat", () => { if (state.Active) togglePause(); else workspace?.Invoke("chat"); });
+            stop = AddButton("Notes", "notes", () => { if (state.Active) finish(); else workspace?.Invoke("notes"); });
             more = AddButton("", "more", ShowMenu); more.AccessibleName = "More options";
             tips.SetToolTip(record, "Record · Ctrl+Alt+R"); tips.SetToolTip(pause, "Pause / resume · Ctrl+Alt+P"); tips.SetToolTip(stop, "Stop · Ctrl+Alt+R"); tips.SetToolTip(more, "Position, sessions and settings");
             menu = new ContextMenuStrip { ShowImageMargin = false, Font = Font, BackColor = Color.FromArgb(30, 33, 41), ForeColor = Color.White, Renderer = new IslandMenuRenderer() };
-            menu.Items.Add("Open Afterimage", null, (_, _) => open()); menu.Items.Add("Sessions", null, (_, _) => library()); menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Chat", null, (_, _) => workspace?.Invoke("chat")); menu.Items.Add("Notes", null, (_, _) => workspace?.Invoke("notes")); menu.Items.Add("Recording settings", null, (_, _) => open()); menu.Items.Add("Sessions", null, (_, _) => library()); menu.Items.Add(new ToolStripSeparator());
             var positions = new ToolStripMenuItem("Position");
             foreach (string value in new[] { "left", "center", "right" }) {
                 var item = new ToolStripMenuItem(value == "center" ? "Center" : value == "left" ? "Left" : "Right") { Tag = value };
@@ -60,7 +64,7 @@ namespace Afterimage
             MouseDown += (_, e) => { if (e.Button == MouseButtons.Right) ShowMenu(); else SetExpanded(true); };
             DpiChanged += (_, _) => BeginInvoke((Action)RenderFrame);
             VisibleChanged += (_, _) => { if (Visible) { RenderFrame(); if (Math.Abs(expansion - (expanded ? 1 : 0)) > .0007f) StartAnimation(); } else { animation.Stop(); leave.Stop(); } };
-            RefreshState();
+            CacheDisplay(); RefreshState();
         }
         protected override bool ShowWithoutActivation => true;
         protected override CreateParams CreateParams { get { var p = base.CreateParams; p.ExStyle |= 0x08080080; return p; } }
@@ -76,12 +80,20 @@ namespace Afterimage
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); ExcludeFromCapture(Handle); RenderFrame(); }
         protected override void OnPaint(PaintEventArgs e) { }
         protected override void OnPaintBackground(PaintEventArgs e) { }
-        internal void RefreshState() { if (IsDisposed) return; var next = readState(); if (next == state) return; state = next; UpdateControls(); RenderFrame(); }
-        internal void Reposition() { if (!IsDisposed) RenderFrame(); }
+        internal void RefreshState()
+        {
+            if (IsDisposed) return; var next = readState(); if (next == state) return; state = next;
+            float rest = (RestWidth - 56) / 82;
+            if (!Visible || expansion == 1 || !ClientAnimationsEnabled()) { restExpansion = rest; restVelocity = 0; }
+            else if (Math.Abs(restExpansion - rest) > .0007f) StartAnimation();
+            UpdateControls(); RenderFrame();
+        }
+        private void CacheDisplay() { var config = readSettings(); displayArea = (Screen.AllScreens.FirstOrDefault(s => s.DeviceName == config.Monitor) ?? Screen.PrimaryScreen).WorkingArea; }
+        internal void Reposition() { if (!IsDisposed) { CacheDisplay(); RenderFrame(); } }
         internal bool ContainsControlPoint(Point point) => Visible && BodyContains(PointToClient(point)) || menu.Visible && menu.Bounds.Contains(point) || menu.Items.OfType<ToolStripMenuItem>().Any(item => item.HasDropDownItems && item.DropDown.Visible && item.DropDown.Bounds.Contains(point));
         private bool BodyContains(Point point)
         {
-            var b = Body; float x = point.X / ScaleFactor, y = point.Y / ScaleFactor, r = 15 + 9 * expansion;
+            var b = Body; float x = point.X / ScaleFactor, y = point.Y / ScaleFactor, r = 13 + 11 * expansion;
             if (!b.Contains(x, y)) return false;
             float dx = x - Math.Clamp(x, b.Left + r, b.Right - r), dy = y - Math.Clamp(y, b.Top + r, b.Bottom - r);
             return dx * dx + dy * dy <= r * r;
@@ -102,7 +114,7 @@ namespace Afterimage
         private void StartAnimation() { if (animation.Enabled) return; motion.Restart(); lastFrame = 0; animation.Start(); }
         internal static void StepSpring(ref float position, ref float speed, float target, float seconds)
         {
-            const float frequency = 26;
+            const float frequency = 46;
             float error = position - target, c = speed + frequency * error, decay = MathF.Exp(-frequency * seconds);
             position = target + (error + c * seconds) * decay; speed = (speed - frequency * c * seconds) * decay;
             if (position < 0 || position > 1) { position = Math.Clamp(position, 0, 1); speed = 0; }
@@ -113,6 +125,9 @@ namespace Afterimage
             float target = expanded ? 1 : 0; StepSpring(ref expansion, ref velocity, target, dt);
             bool moving = Math.Abs(expansion - target) > .0007f || Math.Abs(velocity) > .012f;
             if (!moving) { expansion = target; velocity = 0; }
+            float rest = (RestWidth - 56) / 82; StepSpring(ref restExpansion, ref restVelocity, rest, dt);
+            bool restMoving = Math.Abs(restExpansion - rest) > .0007f || Math.Abs(restVelocity) > .012f;
+            if (!restMoving) { restExpansion = rest; restVelocity = 0; } moving |= restMoving;
             foreach (var b in Controls.OfType<IslandButton>()) moving |= b.AnimateHover(dt);
             UpdateControls(); RenderFrame(); if (!moving) animation.Stop();
         }
@@ -133,8 +148,7 @@ namespace Afterimage
                 float spacing = (body.Width - 24) / 300, row = body.Height - 51;
                 Place(record, 12, row, 98 * spacing, 38); Place(pause, 12 + 104 * spacing, row, 94 * spacing, 38); Place(stop, 12 + 204 * spacing, row, 96 * spacing, 38); Place(more, body.Width - 43, 9, 30, 29);
                 surface.Draw(canvasSize, scale, DrawScene);
-                var config = readSettings(); var screen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == config.Monitor) ?? Screen.PrimaryScreen;
-                var location = AnchorPoint(screen.WorkingArea, canvasSize, config.IslandPosition, Px(18 - Inset), Px(8 - Inset));
+                var location = AnchorPoint(displayArea, canvasSize, readSettings().IslandPosition, Px(18 - Inset), Px(8 - Inset));
                 surface.Present(Handle, location, canvasSize); PresentCount++;
             } finally { drawing = false; }
         }
@@ -145,9 +159,13 @@ namespace Afterimage
         private void UpdateControls()
         {
             // Keep native input targets in sync with the visible alpha surface.
-            bool interactive = expanded && expansion > .94f; foreach (Control c in Controls) c.Visible = interactive;
-            record.Enabled = !state.Active && !state.Busy; pause.Enabled = state.Active && !state.Busy; stop.Enabled = state.Active && (!state.Busy || state.Status == "Starting");
-            pause.Text = state.Paused ? "Resume" : "Pause"; pause.Glyph = state.Paused ? "play" : "pause"; pause.AccessibleName = pause.Text;
+            bool interactive = expanded && expansion > .86f; foreach (Control c in Controls) c.Visible = interactive;
+            record.Enabled = !state.Busy && !state.Paused; record.Text = state.Active ? "Mark" : "Record"; record.Glyph = state.Active ? "mark" : "record"; record.AccessibleName = record.Text;
+            tips.SetToolTip(record, state.Active ? "Mark a step · Ctrl+Alt+M" : "Record · Ctrl+Alt+R");
+            pause.Enabled = !state.Busy; stop.Enabled = !state.Busy || state.Status == "Starting";
+            pause.Text = !state.Active ? "Chat" : state.Paused ? "Resume" : "Pause"; pause.Glyph = !state.Active ? "chat" : state.Paused ? "play" : "pause"; pause.AccessibleName = pause.Text;
+            stop.Text = state.Active ? "Stop" : "Notes"; stop.Glyph = state.Active ? "stop" : "notes"; stop.AccessibleName = stop.Text;
+            tips.SetToolTip(pause, state.Active ? "Pause / resume · Ctrl+Alt+P" : "Open AI chat · Ctrl+Alt+Space"); tips.SetToolTip(stop, state.Active ? "Stop · Ctrl+Alt+R" : "Open notes");
             AccessibleDescription = state.Status + (state.Active ? " " + SessionLibrary.Duration(state.Seconds, true) : "");
         }
         internal Bitmap Snapshot() => surface.Snapshot(canvasSize);
@@ -161,7 +179,7 @@ namespace Afterimage
         private static Color Fade(Color color, float opacity) => Color.FromArgb((int)Math.Clamp(Math.Round(color.A * opacity), 0, 255), color.R, color.G, color.B);
         private void DrawScene(Graphics g)
         {
-            var body = Body; float radius = 15 + 9 * expansion;
+            var body = Body; float radius = 13 + 11 * expansion;
             for (int i = 5; i >= 1; i--) {
                 var box = body; box.Inflate(i, i); box.Y += 1;
                 using var shadow = Round(box, radius + i); using var brush = new SolidBrush(Color.FromArgb(4 + (5 - i) * 2, 5, 7, 14)); g.FillPath(brush, shadow);
@@ -173,13 +191,15 @@ namespace Afterimage
             using (var reflection = new LinearGradientBrush(body, Color.FromArgb(72, 224, 232, 255), Color.FromArgb(15, 205, 215, 245), 90))
             using (var edge = new Pen(reflection, .8f)) g.DrawPath(edge, rim);
             var contentState = g.Save(); g.SetClip(shape);
-            float header = Smooth(.5f, .95f, expansion), compact = 1 - Smooth(.06f, .55f, expansion), reveal = Smooth(.8f, .98f, expansion);
-            Color status = state.Busy ? Dim : state.Paused ? Color.FromArgb(242, 193, 107) : state.Active ? Color.FromArgb(255, 102, 124) : Color.FromArgb(167, 175, 194);
-            float dotX = Inset + 15 + 2 * expansion, dotY = Inset + 15 + 7 * expansion;
-            using (var dot = new SolidBrush(status)) g.FillEllipse(dot, dotX - 2.6f, dotY - 2.6f, 5.2f, 5.2f);
-            DrawLabel(g, state.Active ? SessionLibrary.Duration(state.Seconds, true) : "Afterimage", textFont, new RectangleF(Inset + 28, Inset, 103, 30), Color.FromArgb(229, 233, 242), compact);
-            DrawLabel(g, state.Status, textFont, new RectangleF(Inset + 28, Inset + 8, 132, 30), Dim, header);
-            DrawLabel(g, SessionLibrary.Duration(state.Seconds, true), timerFont, new RectangleF(body.Right - 160, Inset + 8, 108, 30), Color.FromArgb(242, 244, 250), header, StringAlignment.Far);
+            float header = Smooth(.25f, .82f, expansion), compact = 1 - Smooth(.06f, .45f, expansion), reveal = Smooth(.48f, .86f, expansion);
+            Color status = state.Busy ? Dim : state.Paused ? Color.FromArgb(242, 193, 107) : state.Active ? Color.FromArgb(255, 102, 124) : state.Activity.Length > 0 ? Brand.Frost : Color.FromArgb(167, 175, 194);
+            float dotX = Inset + 38 - 21 * expansion, dotY = Inset + 13 + 9 * expansion;
+            if (compact > 0) { var saved = g.Save(); g.SetClip(new RectangleF(Inset, Inset, 30, 26)); Brand.Draw(g, new RectangleF(Inset + 8, Inset + 4, 18, 18), null, compact); g.Restore(saved); }
+            using (var dot = new SolidBrush(status)) g.FillEllipse(dot, dotX - 2.3f, dotY - 2.3f, 4.6f, 4.6f);
+            string compactText = (state.Active ? SessionLibrary.Duration(state.Seconds, true) : "") + (state.Activity.Length > 0 ? (state.Active ? " · " : "") + state.Activity : "");
+            DrawLabel(g, compactText, textFont, new RectangleF(Inset + 48, Inset, RestWidth - 52, 26), Color.FromArgb(229, 233, 242), compact);
+            DrawLabel(g, state.Status + (state.Activity.Length > 0 ? " · " + state.Activity : ""), textFont, new RectangleF(Inset + 28, Inset + 8, 132, 30), Dim, header);
+            if (state.Active || state.Seconds > 0) DrawLabel(g, SessionLibrary.Duration(state.Seconds, true), timerFont, new RectangleF(body.Right - 160, Inset + 8, 108, 30), Color.FromArgb(242, 244, 250), header, StringAlignment.Far);
             if (reveal > 0) foreach (var b in Controls.OfType<IslandButton>()) DrawButton(g, b, b == more ? header : reveal);
             g.Restore(contentState);
         }
@@ -198,6 +218,9 @@ namespace Afterimage
             using var ink = new SolidBrush(Fade(fg, opacity)); float x = box.Left + 17, y = box.Top + box.Height / 2;
             switch (button.Glyph) {
                 case "record": using (var red = new SolidBrush(Fade(button.Enabled ? Color.FromArgb(222, 61, 89) : fg, opacity))) g.FillEllipse(red, x - 3.7f, y - 3.7f, 7.4f, 7.4f); break;
+                case "mark": g.FillPolygon(ink, new[] { new PointF(x - 3, y - 4), new PointF(x + 3, y - 4), new PointF(x + 3, y + 4), new PointF(x, y + 2), new PointF(x - 3, y + 4) }); break;
+                case "chat": using (var p = Round(new RectangleF(x - 4, y - 4, 8, 7), 2)) { using var pen = new Pen(Fade(fg, opacity), 1.2f); g.DrawPath(pen, p); g.DrawLine(pen, x - 2, y + 3, x - 3, y + 5); } break;
+                case "notes": using (var pen = new Pen(Fade(fg, opacity), 1.2f)) { for (int i = -1; i <= 1; i++) g.DrawLine(pen, x - 4, y + i * 3, x + (i == 1 ? 1 : 4), y + i * 3); } break;
                 case "stop": using (var p = Round(new RectangleF(x - 3.6f, y - 3.6f, 7.2f, 7.2f), 1.8f)) g.FillPath(ink, p); break;
                 case "pause": using (var left = Round(new RectangleF(x - 3.5f, y - 4, 2.4f, 8), .7f)) g.FillPath(ink, left); using (var right = Round(new RectangleF(x + 1.1f, y - 4, 2.4f, 8), .7f)) g.FillPath(ink, right); break;
                 case "play": g.FillPolygon(ink, new[] { new PointF(x - 2.8f, y - 4.4f), new PointF(x + 4.3f, y), new PointF(x - 2.8f, y + 4.4f) }); break;

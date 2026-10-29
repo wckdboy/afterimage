@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs><linearGradient id="glass" x1="160" y1="88" x2="160" y2="232" gradientUnits="userSpaceOnUse"><stop stop-color="#DAE2F8"/><stop offset="1" stop-color="#ADBDE0"/></linearGradient></defs>
+  <rect x="24" y="24" width="160" height="160" rx="48" fill="#95A4CC" fill-opacity=".314"/>
+  <rect x="56" y="56" width="160" height="160" rx="48" fill="#95A4CC" fill-opacity=".667"/>
+  <rect x="88" y="88" width="144" height="144" rx="40" fill="url(#glass)"/>
+  <circle cx="160" cy="160" r="24" fill="#FF667C"/>
+</svg>

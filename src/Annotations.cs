@@ -23,7 +23,7 @@ namespace Afterimage
             else if (kind.StartsWith("mouse_")) {
                 string action = kind == "mouse_left_click" ? "Left click" : kind == "mouse_right_click" ? "Right click" : kind == "mouse_middle_click" ? "Middle click" : kind == "mouse_scroll" ? (Convert.ToInt32(e["wheel_delta"]) > 0 ? "Scroll up" : "Scroll down") : "Mouse action";
                 text = action + " at (" + e["screen_x"] + ", " + e["screen_y"] + ")" + (app.Length > 0 ? " · " + app : "");
-            } else if (kind == "workflow_marker") text = "Workflow step marked" + (app.Length > 0 ? " · " + app : "");
+            } else if (kind == "workflow_marker") text = (e.TryGetValue("label", out var label) ? Convert.ToString(label, CultureInfo.InvariantCulture) : "Workflow step marked") + (app.Length > 0 ? " · " + app : "");
             // Bound annotation memory even during very heavy input. Full events remain on disk.
             // Encoder startup can leave a small gap before the first frame of a new clip.
             // Keep that activity at the nearest playable instant; retain its original offset too.

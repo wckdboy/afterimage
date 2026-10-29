@@ -107,9 +107,12 @@ namespace Afterimage
             if (wheel != 0) e["wheel_delta"] = wheel;
             Enqueue(e);
         }
-        internal void Mark()
+        internal void Mark(string label = null)
         {
-            if (State == "Recording") Enqueue(Stamp("workflow_marker"));
+            if (State != "Recording" || manualPaused) return;
+            var entry = Stamp("workflow_marker");
+            if (!string.IsNullOrWhiteSpace(label)) entry["label"] = label.Substring(0, Math.Min(240, label.Length)).Replace('\r', ' ').Replace('\n', ' ');
+            Enqueue(entry);
         }
         private void Enqueue(Dictionary<string, object> item)
         {

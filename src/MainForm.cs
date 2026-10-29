@@ -64,6 +64,8 @@ namespace Afterimage
         private Settings settings;
         private Recorder recorder;
         private IslandForm island;
+        private CompanionForm companion;
+        private bool closingWorkspace, workspaceClosed;
         private bool interfaceStarted, stopping;
         private readonly bool persistSettings;
         private readonly NotifyIcon tray = new NotifyIcon();
@@ -83,6 +85,8 @@ namespace Afterimage
         private string latestSession;
         private TimeSpan lastCpu;
         private DateTime lastCpuAt = DateTime.UtcNow;
+        private DateTime markedUntil;
+        internal string RecordingState => recorder?.State;
         internal MainForm(Settings initial = null, bool preview = false)
         {
             SuspendLayout();
@@ -91,8 +95,9 @@ namespace Afterimage
             ClientSize = new Size(480, 582); FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
             settings = initial ?? Json.Load(settingsPath);
             persistSettings = !preview;
-            idleIcon = MakeIcon(Theme.Muted); recordingIcon = MakeIcon(Color.FromArgb(218, 56, 77)); pausedIcon = MakeIcon(Color.FromArgb(201, 147, 41)); Icon = idleIcon;
+            idleIcon = Brand.Icon(); recordingIcon = Brand.Icon(Brand.Accent); pausedIcon = Brand.Icon(Color.FromArgb(242, 193, 107)); Icon = idleIcon;
             Label title = Theme.Label("Afterimage", 12, FontStyle.Bold); title.Location = new Point(24, 22); Controls.Add(title);
+            Button workspace = Theme.Link("Chat & notes"); workspace.SetBounds(322, 17, 134, 32); workspace.Click += (_, _) => OpenWorkspace("chat"); Controls.Add(workspace);
             state = Theme.Label("Ready", 9, FontStyle.Regular); state.ForeColor = Theme.Muted; state.AutoSize = false; state.TextAlign = ContentAlignment.MiddleRight; state.SetBounds(300, 20, 156, 26); Controls.Add(state);
             elapsed = Theme.Label("00:00:00", 37, FontStyle.Regular); elapsed.Location = new Point(19, 64); Controls.Add(elapsed);
             format = Theme.Label("", 9, FontStyle.Regular); format.ForeColor = Theme.Muted; format.Location = new Point(25, 132); Controls.Add(format);
@@ -111,7 +116,7 @@ namespace Afterimage
             };
             record = Theme.Button("Record", 216, true); record.SetBounds(24, 266, 216, 46); Controls.Add(record); record.Click += delegate { ToggleRecording(); };
             pause = Theme.Button("Pause", 96, false); pause.SetBounds(252, 266, 96, 46); pause.Enabled = false; Controls.Add(pause); pause.Click += delegate { TogglePause(); };
-            marker = Theme.Button("Mark", 96, false); marker.SetBounds(360, 266, 96, 46); marker.Enabled = false; Controls.Add(marker); marker.Click += delegate { if (recorder != null) { recorder.Mark(); state.Text = "Marked"; } };
+            marker = Theme.Button("Mark", 96, false); marker.SetBounds(360, 266, 96, 46); marker.Enabled = false; Controls.Add(marker); marker.Click += delegate { MarkStep(); };
             Panel divider = new Panel { BackColor = Theme.Line }; divider.SetBounds(24, 336, 432, 1); Controls.Add(divider);
             Label recentTitle = Theme.Label("Recent sessions", 10, FontStyle.Bold); recentTitle.Location = new Point(24, 357); Controls.Add(recentTitle);
             Button all = Theme.Link("View all"); all.SetBounds(376, 349, 88, 32); all.Click += delegate { using var library = new LibraryForm(settings.OutputFolder); library.ShowDialog(this); }; Controls.Add(all);
@@ -125,6 +130,7 @@ namespace Afterimage
             ContextMenuStrip menu = new ContextMenuStrip(); menu.Items.Add("Open", null, delegate { ShowWindow(); }); menu.Items.Add("Record / stop", null, delegate { ToggleRecording(); }); menu.Items.Add("Pause / resume", null, delegate { TogglePause(); }); menu.Items.Add("Mark", null, delegate { if (recorder != null) recorder.Mark(); }); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add("Exit", null, delegate { ExitApp(); });
             tray.Icon = idleIcon; tray.Text = "Afterimage · ready"; tray.ContextMenuStrip = menu; tray.Visible = !preview; tray.DoubleClick += delegate { ShowWindow(); };
             menu.Items.Insert(1, new ToolStripMenuItem("Show floating controls", null, delegate { settings.IslandEnabled = true; SaveSettings(); }));
+            menu.Items.Insert(1, new ToolStripMenuItem("Chat & notes", null, (_, _) => OpenWorkspace("chat")));
             ticker.Tick += delegate { Tick(); }; ticker.Start(); SystemEvents.SessionSwitch += SessionChanged; SystemEvents.PowerModeChanged += PowerChanged;
             SystemEvents.DisplaySettingsChanged += DisplaysChanged;
             Resize += delegate { if (WindowState == FormWindowState.Minimized) Hide(); };
@@ -136,6 +142,7 @@ namespace Afterimage
             BeginInvoke((Action)(() => {
                 interfaceStarted = true; RefreshRecent();
                 bool r = Win.RegisterHotKey(Handle, 1, 0x4003, (uint)Keys.R), p = Win.RegisterHotKey(Handle, 2, 0x4003, (uint)Keys.P), m = Win.RegisterHotKey(Handle, 3, 0x4003, (uint)Keys.M);
+                Win.RegisterHotKey(Handle, 4, 0x4003, (uint)Keys.Space);
                 if (!r) tips.SetToolTip(record, "Ctrl+Alt+R is in use by another app"); if (!p) tips.SetToolTip(pause, "Ctrl+Alt+P is in use by another app"); if (!m) tips.SetToolTip(marker, "Ctrl+Alt+M is in use by another app");
                 SyncIsland(); if (!settings.IslandEnabled) ShowWindow();
                 if (settings.StartOnLaunch) BeginRecording();
@@ -145,8 +152,9 @@ namespace Afterimage
         {
             bool active = recorder != null && recorder.IsAlive;
             bool busy = active && (stopping || recorder.State == "Starting" || recorder.State == "Stopping");
-            return new IslandState(active, active && (recorder.ManualPaused || recorder.State == "Paused"), busy,
-                active ? stopping ? "Saving" : recorder.State : recorder?.Error != null ? "Error" : recorder != null ? "Saved" : "Afterimage", recorder?.RecordedSeconds ?? 0);
+            string status = active ? stopping ? "Saving" : recorder.ManualPaused ? "Paused" : recorder.State == "Paused" ? "Resuming" : recorder.State : recorder?.Error != null ? "Error" : recorder != null ? "Saved" : "Afterimage";
+            if (active && recorder.State == "Recording" && !recorder.ManualPaused && DateTime.UtcNow < markedUntil) status = "Marked";
+            return new IslandState(active, active && recorder.ManualPaused, busy, status, Math.Floor(recorder?.RecordedSeconds ?? 0), companion?.IsStreaming == true ? "AI" : "");
         }
         private void SyncIsland()
         {
@@ -155,7 +163,7 @@ namespace Afterimage
             if (island == null) island = new IslandForm(ReadIslandState, () => settings, BeginRecording, TogglePause, StopRecording, ShowWindow,
                 () => { ShowWindow(); using var library = new LibraryForm(settings.OutputFolder); library.ShowDialog(this); },
                 () => { settings.IslandEnabled = false; SaveSettings(); }, ExitApp,
-                position => { settings.IslandPosition = position; SaveSettings(); });
+                position => { settings.IslandPosition = position; SaveSettings(); }, MarkStep, OpenWorkspace);
             island.Reposition(); island.RefreshState(); if (!island.Visible) island.Show();
         }
         private void DisplaysChanged(object sender, EventArgs e) { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)(() => { UpdateOptions(); island?.Reposition(); })); }
@@ -187,29 +195,31 @@ namespace Afterimage
             try {
                 Screen display = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == settings.Monitor) ?? Screen.PrimaryScreen; settings.Monitor = display.DeviceName; settings.SessionName = sessionName.Text; settings.Validate(); if (persistSettings) Json.Save(settingsPath, settings);
                 if (settings.WorkflowEvents) InstallMouseHook();
-                recorder = new Recorder(settings, display.Bounds); handledEnd = stopping = false; recorder.Start(); SetOptionsEnabled(false); record.Text = "Stop recording"; state.Text = "Starting"; pause.Enabled = true; island?.RefreshState();
+                recorder = new Recorder(settings, display.Bounds); handledEnd = stopping = false; recorder.Start(); ticker.Interval = 100; SetOptionsEnabled(false); record.Text = "Stop recording"; state.Text = "Starting"; pause.Enabled = true; island?.RefreshState();
                 using (Process p = Process.GetCurrentProcess()) lastCpu = p.TotalProcessorTime; lastCpuAt = DateTime.UtcNow;
             } catch (Exception e) { RemoveHook(); ShowError(e.Message); }
         }
         private void StopRecording() { if (recorder != null && recorder.IsAlive && !stopping) { stopping = true; recorder.Stop("Stopped by user"); record.Enabled = pause.Enabled = marker.Enabled = false; state.Text = "Saving"; island?.RefreshState(); } }
         private void ToggleRecording() { if (recorder != null && recorder.IsAlive) StopRecording(); else BeginRecording(); }
         private void TogglePause() { if (recorder != null && recorder.IsAlive && !stopping) { recorder.Pause(!recorder.ManualPaused); island?.RefreshState(); } }
+        private void MarkStep() { if (recorder?.State == "Recording" && !recorder.ManualPaused && !stopping) { recorder.Mark(); markedUntil = DateTime.UtcNow.AddMilliseconds(900); state.Text = "Marked"; island?.RefreshState(); } }
         private void Tick()
         {
             island?.RefreshState();
             if (recorder == null) return;
             if (recorder.SessionFolder != null) latestSession = recorder.SessionFolder;
-            review.Enabled = latestSession != null && File.Exists(Path.Combine(latestSession, "Review.html"));
             elapsed.Text = SessionLibrary.Duration(recorder.RecordedSeconds, true);
             if (!recorder.IsAlive && !handledEnd) {
-                handledEnd = true; RemoveHook(); SetOptionsEnabled(true); record.Enabled = true; record.Text = "Record"; pause.Enabled = marker.Enabled = false; pause.Text = "Pause"; state.Text = recorder.Error == null ? "Saved" : "Error"; state.ForeColor = recorder.Error == null ? Theme.Muted : Color.Firebrick; tray.Icon = idleIcon; tray.Text = "Afterimage · stopped"; RefreshRecent();
+                handledEnd = true; ticker.Interval = 1000; RemoveHook(); SetOptionsEnabled(true); record.Enabled = true; record.Text = "Record"; pause.Enabled = marker.Enabled = false; pause.Text = "Pause"; state.Text = recorder.Error == null ? "Saved" : "Error"; state.ForeColor = recorder.Error == null ? Theme.Muted : Color.Firebrick; tray.Icon = idleIcon; tray.Text = "Afterimage · stopped"; RefreshRecent();
                 if (recorder.Error != null) ShowError(recorder.Error); else if (recorder.StopReason != null && recorder.StopReason.StartsWith("Stopped:")) ShowError(recorder.StopReason);
                 if (exitRequested) { Close(); return; }
             } else if (recorder.IsAlive) {
-                state.Text = recorder.State == "Recording" ? "● Recording" : recorder.State;
+                state.Text = ReadIslandState().Status;
                 state.ForeColor = recorder.State == "Recording" ? Color.FromArgb(194, 36, 65) : Theme.Muted; pause.Text = recorder.ManualPaused ? "Resume" : "Pause"; marker.Enabled = recorder.State == "Recording";
-                tray.Icon = recorder.State == "Paused" ? pausedIcon : recordingIcon; tray.Text = "Afterimage · " + recorder.State.ToLowerInvariant();
+                var nextIcon = recorder.ManualPaused ? pausedIcon : recordingIcon; if (tray.Icon != nextIcon) tray.Icon = nextIcon;
+                string trayText = "Afterimage · " + recorder.State.ToLowerInvariant(); if (tray.Text != trayText) tray.Text = trayText;
             }
+            if (!Visible || (DateTime.UtcNow - lastCpuAt).TotalSeconds < 1) return;
             using (Process p = Process.GetCurrentProcess()) {
                 DateTime now = DateTime.UtcNow; double cpu = Math.Max(0, (p.TotalProcessorTime - lastCpu).TotalSeconds / Math.Max(.1, (now - lastCpuAt).TotalSeconds) / Environment.ProcessorCount * 100);
                 lastCpu = p.TotalProcessorTime; lastCpuAt = now; resources.Text = String.Format("{0:0}% CPU · {1:0} MB", cpu, p.WorkingSet64 / 1048576.0);
@@ -235,15 +245,37 @@ namespace Afterimage
         private void SessionChanged(object sender, SessionSwitchEventArgs e) { if (recorder == null) return; if (e.Reason == SessionSwitchReason.SessionLock || e.Reason == SessionSwitchReason.RemoteDisconnect || e.Reason == SessionSwitchReason.ConsoleDisconnect) recorder.SystemPause(true); else if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.RemoteConnect || e.Reason == SessionSwitchReason.ConsoleConnect) recorder.SystemPause(false); }
         private void PowerChanged(object sender, PowerModeChangedEventArgs e) { if (recorder != null) { if (e.Mode == PowerModes.Suspend) recorder.SystemPause(true); if (e.Mode == PowerModes.Resume) recorder.SystemPause(false); } }
         private void ShowWindow() { Show(); WindowState = FormWindowState.Normal; Activate(); }
+        private void OpenWorkspace(string page)
+        {
+            if (exitRequested) return;
+            if (companion == null || companion.IsDisposed) {
+                companion = new CompanionForm(() => settings.OutputFolder, text => {
+                    if (recorder?.State != "Recording" || recorder.ManualPaused || stopping) return false;
+                    recorder.Mark(text); markedUntil = DateTime.UtcNow.AddMilliseconds(900); island?.RefreshState(); return true;
+                }, persistSettings ? null : new WorkspaceStore(Path.Combine(settings.OutputFolder, "workspace-test")));
+                companion.ActivityChanged += () => island?.RefreshState();
+            }
+            companion.OpenPage(page);
+        }
+        internal void OpenCompanion() => OpenWorkspace("chat");
         private void ShowError(string text) { MessageBox.Show(this, text, "Afterimage", MessageBoxButtons.OK, MessageBoxIcon.Information); }
         internal void ExitApp() { exitRequested = true; if (recorder != null && recorder.IsAlive) { stopping = true; recorder.Stop("Application exit"); record.Enabled = pause.Enabled = marker.Enabled = false; island?.RefreshState(); } else Close(); }
-        protected override void WndProc(ref Message m) { if (m.Msg == 0x312) { if (m.WParam.ToInt32() == 1) ToggleRecording(); if (m.WParam.ToInt32() == 2) TogglePause(); if (m.WParam.ToInt32() == 3 && recorder != null) recorder.Mark(); } if (m.Msg == 0x11 && recorder != null) recorder.Stop("Windows shutdown"); base.WndProc(ref m); }
-        protected override void OnFormClosing(FormClosingEventArgs e)
+        protected override void WndProc(ref Message m) { if (m.Msg == 0x312) { if (m.WParam.ToInt32() == 1) ToggleRecording(); if (m.WParam.ToInt32() == 2) TogglePause(); if (m.WParam.ToInt32() == 3) MarkStep(); if (m.WParam.ToInt32() == 4) OpenWorkspace("chat"); } if (m.Msg == 0x11 && recorder != null) recorder.Stop("Windows shutdown"); base.WndProc(ref m); }
+        protected override async void OnFormClosing(FormClosingEventArgs e)
         {
             if (!exitRequested && e.CloseReason == CloseReason.UserClosing && (settings.IslandEnabled || recorder != null && recorder.IsAlive)) { e.Cancel = true; Hide(); return; }
+            if (companion != null && !companion.IsDisposed && !workspaceClosed) {
+                e.Cancel = true;
+                if (!closingWorkspace) {
+                    closingWorkspace = true;
+                    if (!await companion.ShutdownAsync()) { closingWorkspace = false; exitRequested = false; return; }
+                    workspaceClosed = true; Close();
+                }
+                return;
+            }
             if (recorder != null && recorder.IsAlive) { recorder.Stop("Application closing"); recorder.Wait(); }
             RemoveHook(); ticker.Stop(); island?.Dispose(); tray.Visible = false; tray.Dispose(); SystemEvents.SessionSwitch -= SessionChanged; SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.DisplaySettingsChanged -= DisplaysChanged;
-            for (int i = 1; i <= 3; i++) Win.UnregisterHotKey(Handle, i); base.OnFormClosing(e);
+            for (int i = 1; i <= 4; i++) Win.UnregisterHotKey(Handle, i); idleIcon.Dispose(); recordingIcon.Dispose(); pausedIcon.Dispose(); base.OnFormClosing(e);
         }
         [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
         private static Icon MakeIcon(Color color) { using (Bitmap b = new Bitmap(32, 32)) { using (Graphics g = Graphics.FromImage(b)) { g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; g.Clear(Color.Transparent); using (Brush brush = new SolidBrush(color)) g.FillEllipse(brush, 3, 3, 26, 26); g.FillRectangle(Brushes.White, 12, 12, 8, 8); } IntPtr p = b.GetHicon(); try { using (Icon i = Icon.FromHandle(p)) return (Icon)i.Clone(); } finally { DestroyIcon(p); } } }
