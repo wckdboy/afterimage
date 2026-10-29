@@ -25,6 +25,10 @@ test-result.json
 # Generated builds and packages
 *.exe
 *.pdb
+*.dll
+/Afterimage.deps.json
+/Afterimage.runtimeconfig.json
+/thumbnail.jpg
 *.zip
 *.tmp
 bin/

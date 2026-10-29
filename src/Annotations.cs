@@ -4,13 +4,13 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Web;
+using System.Net;
 
 namespace Afterimage
 {
     internal sealed class AnnotationTrack
     {
-        internal sealed class Cue { public double at_ms; public double end_ms; public string text; }
+        internal sealed class Cue { public double at_ms; public double source_at_ms; public double end_ms; public string text; }
         private readonly List<Cue> cues = new List<Cue>();
         private double start;
         private string app = "";
@@ -25,11 +25,13 @@ namespace Afterimage
                 text = action + " at (" + e["screen_x"] + ", " + e["screen_y"] + ")" + (app.Length > 0 ? " · " + app : "");
             } else if (kind == "workflow_marker") text = "Workflow step marked" + (app.Length > 0 ? " · " + app : "");
             // Bound annotation memory even during very heavy input. Full events remain on disk.
-            if (text != null && at >= 0 && cues.Count < 20000) cues.Add(new Cue { at_ms = at, text = text.Replace('\r', ' ').Replace('\n', ' ') });
+            // Encoder startup can leave a small gap before the first frame of a new clip.
+            // Keep that activity at the nearest playable instant; retain its original offset too.
+            if (text != null && cues.Count < 20000) cues.Add(new Cue { at_ms = Math.Max(0, at), source_at_ms = at, text = text.Replace('\r', ' ').Replace('\n', ' ') });
         }
         internal void Save(string folder, string video, double duration)
         {
-            Cue[] ordered = cues.Where(c => c.at_ms < duration).OrderBy(c => c.at_ms).ToArray();
+            Cue[] ordered = cues.OrderBy(c => c.at_ms).Select(c => new Cue { at_ms = Math.Min(c.at_ms, Math.Max(0, duration - 1)), source_at_ms = c.source_at_ms, text = c.text }).ToArray();
             StringBuilder srt = new StringBuilder();
             for (int i = 0; i < ordered.Length; i++) {
                 Cue c = ordered[i]; c.end_ms = Math.Min(duration, Math.Min(c.at_ms + 2500, i + 1 < ordered.Length ? ordered[i + 1].at_ms : duration));
@@ -53,7 +55,7 @@ namespace Afterimage
         {
             string[] files = Directory.GetFiles(folder, "clip-*.review.html").OrderBy(x => x, StringComparer.Ordinal).ToArray();
             StringBuilder links = new StringBuilder();
-            foreach (string path in files) { string name = Path.GetFileName(path); links.Append("<a target='review' href='").Append(HttpUtility.HtmlAttributeEncode(name)).Append("'>").Append(HttpUtility.HtmlEncode(name.Replace(".review.html", ""))).Append("</a>"); }
+            foreach (string path in files) { string name = Path.GetFileName(path); links.Append("<a target='review' href='").Append(WebUtility.HtmlEncode(name)).Append("'>").Append(WebUtility.HtmlEncode(name.Replace(".review.html", ""))).Append("</a>"); }
             string html = "<!doctype html><html lang='en'><meta charset='utf-8'><title>Afterimage — session</title><style>body{margin:0;font:14px system-ui;background:#f6f7fb}nav{display:flex;gap:8px;align-items:center;padding:12px;overflow-x:auto;border-bottom:1px solid #ddd}nav strong{white-space:nowrap;margin-right:14px}a{color:#4c3fd0;background:white;border:1px solid #ddd;border-radius:5px;padding:7px;text-decoration:none;white-space:nowrap}iframe{width:100%;height:calc(100vh - 65px);border:0}</style><nav><strong>Session clips</strong>" + links + "</nav><iframe title='Clip review' name='review' src='" + (files.Length > 0 ? Path.GetFileName(files[0]) : "about:blank") + "'></iframe></html>";
             string pathOut = Path.Combine(folder, "Review.html"), temp = pathOut + ".tmp"; File.WriteAllText(temp, html, new UTF8Encoding(false)); if (File.Exists(pathOut)) File.Replace(temp, pathOut, null); else File.Move(temp, pathOut);
         }

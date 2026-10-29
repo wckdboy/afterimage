@@ -14,7 +14,7 @@ namespace Afterimage
             Directory.CreateDirectory(output);
             try {
                 Screen display = Screen.PrimaryScreen;
-                Settings config = new Settings { OutputFolder = output, Monitor = display.DeviceName, Fps = 5, MaxDimension = 1280, SegmentSeconds = 3, WorkflowEvents = true, Hardware = args.Length < 3 || args[2] != "software", TestPattern = true };
+                Settings config = new Settings { OutputFolder = output, SessionName = "Capture check", Monitor = display.DeviceName, Fps = 5, MaxDimension = 1280, SegmentSeconds = 3, WorkflowEvents = true, Hardware = args.Length < 3 || args[2] != "software", TestPattern = true };
                 Recorder r = new Recorder(config, display.Bounds); r.Start();
                 Thread.Sleep(4500); r.Mark(); r.AddClick("left_click", display.Bounds.X + 100, display.Bounds.Y + 100, 0);
                 r.Pause(true); Thread.Sleep(1200); long pausedFrames = r.Frames; Thread.Sleep(600);
@@ -24,6 +24,17 @@ namespace Afterimage
                 if (r.Frames < 12 || Directory.GetFiles(r.SessionFolder, "clip-*.mp4").Length < 2) throw new Exception("Insufficient frames or clips.");
                 if (Directory.GetFiles(r.SessionFolder, "*.partial.mp4").Length != 0) throw new Exception("A clip was not finalized.");
                 if (!File.Exists(Path.Combine(r.SessionFolder, "Review.html"))) throw new Exception("Review page was not generated.");
+                if (!File.Exists(Path.Combine(r.SessionFolder, "thumbnail.jpg"))) throw new Exception("Session thumbnail was not generated.");
+                bool marker = false;
+                foreach (string file in Directory.GetFiles(r.SessionFolder, "*.annotations.json")) {
+                    using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(file));
+                    foreach (var cue in document.RootElement.GetProperty("annotations").EnumerateArray()) {
+                        if (cue.GetProperty("text").GetString().Contains("Workflow step marked")) marker = true;
+                        if (cue.GetProperty("at_ms").GetDouble() < 0) throw new Exception("Negative annotation timestamp.");
+                    }
+                }
+                if (!marker) throw new Exception("Workflow marker did not survive serialization.");
+                if (!SessionLibrary.Read(output).Exists(s => s.Folder == r.SessionFolder && s.Name == "Capture check")) throw new Exception("Saved session missing from library.");
                 if (Validation.Run(r.SessionFolder) != 0) throw new Exception("The video decoder rejected a clip.");
                 foreach (string image in Directory.GetFiles(r.SessionFolder, "*.first-frame.png")) using (Bitmap b = new Bitmap(image)) {
                     Color top = b.GetPixel(20, 20), bottom = b.GetPixel(20, b.Height - 20);

@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using System.Threading.Tasks;
 using Microsoft.Win32;
 
 namespace Afterimage
@@ -15,11 +16,47 @@ namespace Afterimage
         internal static Label Label(string text, float size, FontStyle weight) { return new Label { Text = text, AutoSize = true, Font = new Font("Segoe UI", size, weight), ForeColor = Ink, Margin = new Padding(0) }; }
         internal static Button Button(string text, int width, bool primary)
         {
-            Button b = new Button { Text = text, Width = width, Height = 42, FlatStyle = FlatStyle.Flat, BackColor = primary ? Ink : Color.White, ForeColor = primary ? Color.White : Ink, Font = new Font("Segoe UI", 10), Cursor = Cursors.Hand, Margin = new Padding(0, 0, 10, 0), UseVisualStyleBackColor = false };
+            Button b = new SoftButton { Text = text, Width = width, Height = 42, FlatStyle = FlatStyle.Flat, BackColor = primary ? Ink : Color.White, ForeColor = primary ? Color.White : Ink, Font = new Font("Segoe UI", 10), Cursor = Cursors.Hand, Margin = new Padding(0, 0, 10, 0), UseVisualStyleBackColor = false };
             b.FlatAppearance.BorderSize = primary ? 0 : 1; b.FlatAppearance.BorderColor = Line; b.FlatAppearance.MouseOverBackColor = primary ? Color.FromArgb(55, 58, 67) : Paper;
             return b;
         }
         internal static Button Link(string text) { Button b = Button(text, 90, false); b.Height = 32; b.FlatAppearance.BorderSize = 0; b.BackColor = Paper; b.ForeColor = Muted; return b; }
+        internal static void Open(string path) { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
+        internal sealed class ChoiceBox : ComboBox
+        {
+            internal ChoiceBox() { DrawMode = DrawMode.OwnerDrawFixed; }
+            protected override void OnDrawItem(DrawItemEventArgs e)
+            {
+                e.DrawBackground();
+                string value = e.Index >= 0 && e.Index < Items.Count ? Items[e.Index].ToString() : Text;
+                var bounds = new Rectangle(e.Bounds.X + 3, e.Bounds.Y, e.Bounds.Width - 6, e.Bounds.Height);
+                TextRenderer.DrawText(e.Graphics, value, Font, bounds, Enabled ? e.ForeColor : Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                e.DrawFocusRectangle();
+            }
+        }
+        private sealed class SoftButton : Button
+        {
+            private bool hover, pressed;
+            internal SoftButton() { DoubleBuffered = true; }
+            protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+            protected override void OnMouseLeave(EventArgs e) { hover = pressed = false; Invalidate(); base.OnMouseLeave(e); }
+            protected override void OnMouseDown(MouseEventArgs e) { pressed = true; Invalidate(); base.OnMouseDown(e); }
+            protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                var g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Parent?.BackColor ?? Theme.Paper);
+                float r = 8f * DeviceDpi / 96f; var box = new RectangleF(.5f, .5f, Width - 1, Height - 1);
+                using var path = new System.Drawing.Drawing2D.GraphicsPath();
+                path.AddArc(box.Left, box.Top, r * 2, r * 2, 180, 90); path.AddArc(box.Right - r * 2, box.Top, r * 2, r * 2, 270, 90);
+                path.AddArc(box.Right - r * 2, box.Bottom - r * 2, r * 2, r * 2, 0, 90); path.AddArc(box.Left, box.Bottom - r * 2, r * 2, r * 2, 90, 90); path.CloseFigure();
+                Color fill = !Enabled ? Theme.Line : (hover || pressed) ? FlatAppearance.MouseOverBackColor : BackColor;
+                using (var brush = new SolidBrush(fill)) g.FillPath(brush, path);
+                if (FlatAppearance.BorderSize > 0) using (var pen = new Pen(Theme.Line)) g.DrawPath(pen, path);
+                TextRenderer.DrawText(g, Text, Font, ClientRectangle, Enabled ? ForeColor : Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(ClientRectangle, -5, -5), ForeColor, fill);
+            }
+        }
     }
     internal sealed class MainForm : Form
     {
@@ -31,6 +68,11 @@ namespace Afterimage
         private readonly ToolTip tips = new ToolTip();
         private readonly Label state, elapsed, format, resources;
         private readonly Button record, pause, marker, preferences, review;
+        private readonly ComboBox displayPicker = new Theme.ChoiceBox(), preset = new Theme.ChoiceBox();
+        private readonly TextBox sessionName = new TextBox();
+        private readonly FlowLayoutPanel recent = new FlowLayoutPanel();
+        private bool updatingOptions;
+        private int libraryGeneration;
         private readonly Icon idleIcon, recordingIcon, pausedIcon;
         private Win.HookProc hookProc;
         private IntPtr hook;
@@ -38,31 +80,46 @@ namespace Afterimage
         private string latestSession;
         private TimeSpan lastCpu;
         private DateTime lastCpuAt = DateTime.UtcNow;
-        internal MainForm()
+        internal MainForm(Settings initial = null, bool preview = false)
         {
             SuspendLayout();
             AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = AutoScaleMode.Dpi;
             Text = "Afterimage"; Font = new Font("Segoe UI", 10); BackColor = Theme.Paper; ForeColor = Theme.Ink;
-            ClientSize = new Size(440, 300); FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
-            settings = Json.Load(settingsPath);
+            ClientSize = new Size(480, 582); FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
+            settings = initial ?? Json.Load(settingsPath);
             idleIcon = MakeIcon(Theme.Muted); recordingIcon = MakeIcon(Color.FromArgb(218, 56, 77)); pausedIcon = MakeIcon(Color.FromArgb(201, 147, 41)); Icon = idleIcon;
-            Label title = Theme.Label("Afterimage", 12, FontStyle.Bold); title.Location = new Point(26, 24); Controls.Add(title);
-            state = Theme.Label("Ready", 9, FontStyle.Regular); state.ForeColor = Theme.Muted; state.AutoSize = false; state.TextAlign = ContentAlignment.MiddleRight; state.SetBounds(285, 23, 128, 24); Controls.Add(state);
-            elapsed = Theme.Label("00:00:00", 37, FontStyle.Regular); elapsed.Location = new Point(21, 64); Controls.Add(elapsed);
-            format = Theme.Label("", 9, FontStyle.Regular); format.ForeColor = Theme.Muted; format.Location = new Point(27, 132); Controls.Add(format); UpdateFormat();
-            record = Theme.Button("Record", 174, true); record.Location = new Point(26, 171); Controls.Add(record); record.Click += delegate { ToggleRecording(); };
-            pause = Theme.Button("Pause", 94, false); pause.Location = new Point(210, 171); pause.Enabled = false; Controls.Add(pause); pause.Click += delegate { TogglePause(); };
-            marker = Theme.Button("Mark", 94, false); marker.Location = new Point(314, 171); marker.Enabled = false; Controls.Add(marker); marker.Click += delegate { if (recorder != null) { recorder.Mark(); state.Text = "Marked"; } };
-            Panel divider = new Panel { BackColor = Theme.Line }; divider.SetBounds(26, 233, 382, 1); Controls.Add(divider);
-            preferences = Theme.Link("Settings"); preferences.SetBounds(16, 245, 82, 32); Controls.Add(preferences); preferences.Click += delegate { using (SettingsForm form = new SettingsForm(settings)) if (form.ShowDialog(this) == DialogResult.OK) { settings = form.Result; SaveSettings(); UpdateFormat(); } };
-            Button folder = Theme.Link("Folder"); folder.SetBounds(100, 245, 66, 32); Controls.Add(folder); folder.Click += delegate { try { Directory.CreateDirectory(settings.OutputFolder); Process.Start(settings.OutputFolder); } catch (Exception e) { ShowError(e.Message); } };
-            review = Theme.Link("Review"); review.SetBounds(170, 245, 74, 32); review.Enabled = false; Controls.Add(review); review.Click += delegate { try { Process.Start(Path.Combine(latestSession, "Review.html")); } catch (Exception e) { ShowError(e.Message); } };
-            resources = Theme.Label("", 8, FontStyle.Regular); resources.AutoSize = false; resources.ForeColor = Theme.Muted; resources.TextAlign = ContentAlignment.MiddleRight; resources.SetBounds(248, 247, 160, 28); Controls.Add(resources);
+            Label title = Theme.Label("Afterimage", 12, FontStyle.Bold); title.Location = new Point(24, 22); Controls.Add(title);
+            state = Theme.Label("Ready", 9, FontStyle.Regular); state.ForeColor = Theme.Muted; state.AutoSize = false; state.TextAlign = ContentAlignment.MiddleRight; state.SetBounds(300, 20, 156, 26); Controls.Add(state);
+            elapsed = Theme.Label("00:00:00", 37, FontStyle.Regular); elapsed.Location = new Point(19, 64); Controls.Add(elapsed);
+            format = Theme.Label("", 9, FontStyle.Regular); format.ForeColor = Theme.Muted; format.Location = new Point(25, 132); Controls.Add(format);
+            var nameLabel = Theme.Label("Session", 9, FontStyle.Regular); nameLabel.ForeColor = Theme.Muted; nameLabel.Location = new Point(24, 175); Controls.Add(nameLabel);
+            sessionName.SetBounds(100, 168, 356, 28); sessionName.PlaceholderText = "Name this session"; sessionName.MaxLength = 160; sessionName.BorderStyle = BorderStyle.FixedSingle; sessionName.BackColor = Color.White; sessionName.AccessibleName = "Session name"; Controls.Add(sessionName);
+            displayPicker.SetBounds(24, 213, 276, 30); displayPicker.DropDownStyle = ComboBoxStyle.DropDownList; displayPicker.FlatStyle = FlatStyle.Standard; displayPicker.BackColor = Color.White; displayPicker.AccessibleName = "Display"; Controls.Add(displayPicker);
+            preset.SetBounds(312, 213, 144, 30); preset.DropDownStyle = ComboBoxStyle.DropDownList; preset.FlatStyle = FlatStyle.Standard; preset.Items.AddRange(new object[] { "Lean", "Balanced", "Detailed", "Custom" }); preset.AccessibleName = "Recording quality"; Controls.Add(preset);
+            displayPicker.SelectedIndexChanged += delegate { if (!updatingOptions && displayPicker.SelectedItem is DisplayChoice d) { settings.Monitor = d.DeviceName; SaveSettings(); } };
+            preset.SelectedIndexChanged += delegate {
+                if (updatingOptions || preset.SelectedIndex < 0 || preset.SelectedIndex == 3) return;
+                int i = preset.SelectedIndex; settings.Fps = new[] { 2, 5, 15 }[i]; settings.MaxDimension = new[] { 1280, 1920, 2560 }[i]; settings.Bitrate = new[] { 1000000, 2500000, 5000000 }[i]; SaveSettings(); UpdateFormat();
+            };
+            record = Theme.Button("Record", 216, true); record.SetBounds(24, 266, 216, 46); Controls.Add(record); record.Click += delegate { ToggleRecording(); };
+            pause = Theme.Button("Pause", 96, false); pause.SetBounds(252, 266, 96, 46); pause.Enabled = false; Controls.Add(pause); pause.Click += delegate { TogglePause(); };
+            marker = Theme.Button("Mark", 96, false); marker.SetBounds(360, 266, 96, 46); marker.Enabled = false; Controls.Add(marker); marker.Click += delegate { if (recorder != null) { recorder.Mark(); state.Text = "Marked"; } };
+            Panel divider = new Panel { BackColor = Theme.Line }; divider.SetBounds(24, 336, 432, 1); Controls.Add(divider);
+            Label recentTitle = Theme.Label("Recent sessions", 10, FontStyle.Bold); recentTitle.Location = new Point(24, 357); Controls.Add(recentTitle);
+            Button all = Theme.Link("View all"); all.SetBounds(376, 349, 88, 32); all.Click += delegate { using var library = new LibraryForm(settings.OutputFolder); library.ShowDialog(this); }; Controls.Add(all);
+            recent.SetBounds(24, 391, 444, 136); recent.WrapContents = false; Controls.Add(recent);
+            preferences = Theme.Link("Settings"); preferences.SetBounds(14, 543, 76, 32); Controls.Add(preferences); preferences.Click += delegate { using (SettingsForm form = new SettingsForm(settings)) if (form.ShowDialog(this) == DialogResult.OK) { settings = form.Result; SaveSettings(); UpdateOptions(); RefreshRecent(); } };
+            Button folder = Theme.Link("Folder"); folder.SetBounds(90, 543, 62, 32); Controls.Add(folder); folder.Click += delegate { try { Directory.CreateDirectory(settings.OutputFolder); Theme.Open(settings.OutputFolder); } catch (Exception e) { ShowError(e.Message); } };
+            review = Theme.Link("Review"); review.SetBounds(152, 543, 66, 32); review.Enabled = false; Controls.Add(review); review.Click += delegate { try { Theme.Open(Path.Combine(latestSession, "Review.html")); } catch (Exception e) { ShowError(e.Message); } };
+            resources = Theme.Label("", 8, FontStyle.Regular); resources.AutoSize = false; resources.ForeColor = Theme.Muted; resources.TextAlign = ContentAlignment.MiddleRight; resources.SetBounds(226, 545, 230, 28); Controls.Add(resources);
+            UpdateOptions();
             tips.SetToolTip(record, "Ctrl+Alt+R"); tips.SetToolTip(pause, "Ctrl+Alt+P"); tips.SetToolTip(marker, "Mark a workflow step · Ctrl+Alt+M"); tips.SetToolTip(review, "Review completed clips and annotations");
             ContextMenuStrip menu = new ContextMenuStrip(); menu.Items.Add("Open", null, delegate { ShowWindow(); }); menu.Items.Add("Record / stop", null, delegate { ToggleRecording(); }); menu.Items.Add("Pause / resume", null, delegate { TogglePause(); }); menu.Items.Add("Mark", null, delegate { if (recorder != null) recorder.Mark(); }); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add("Exit", null, delegate { ExitApp(); });
-            tray.Icon = idleIcon; tray.Text = "Afterimage · ready"; tray.ContextMenuStrip = menu; tray.Visible = true; tray.DoubleClick += delegate { ShowWindow(); };
+            tray.Icon = idleIcon; tray.Text = "Afterimage · ready"; tray.ContextMenuStrip = menu; tray.Visible = !preview; tray.DoubleClick += delegate { ShowWindow(); };
             ticker.Tick += delegate { Tick(); }; ticker.Start(); SystemEvents.SessionSwitch += SessionChanged; SystemEvents.PowerModeChanged += PowerChanged;
             Shown += delegate {
+                RefreshRecent();
+                if (preview) return;
                 bool r = Win.RegisterHotKey(Handle, 1, 0x4003, (uint)Keys.R), p = Win.RegisterHotKey(Handle, 2, 0x4003, (uint)Keys.P), m = Win.RegisterHotKey(Handle, 3, 0x4003, (uint)Keys.M);
                 if (!r) tips.SetToolTip(record, "Ctrl+Alt+R is in use by another app"); if (!p) tips.SetToolTip(pause, "Ctrl+Alt+P is in use by another app"); if (!m) tips.SetToolTip(marker, "Ctrl+Alt+M is in use by another app");
                 if (settings.StartOnLaunch) BeginRecording();
@@ -70,14 +127,34 @@ namespace Afterimage
             Resize += delegate { if (WindowState == FormWindowState.Minimized) Hide(); };
             ResumeLayout(true);
         }
+        private void UpdateOptions()
+        {
+            updatingOptions = true; displayPicker.Items.Clear();
+            foreach (var s in Screen.AllScreens) displayPicker.Items.Add(new DisplayChoice(s));
+            displayPicker.SelectedIndex = Math.Max(0, Array.FindIndex(Screen.AllScreens, s => s.DeviceName == settings.Monitor));
+            preset.SelectedIndex = settings.Fps == 2 && settings.MaxDimension == 1280 && settings.Bitrate == 1000000 ? 0 : settings.Fps == 5 && settings.MaxDimension == 1920 && settings.Bitrate == 2500000 ? 1 : settings.Fps == 15 && settings.MaxDimension == 2560 && settings.Bitrate == 5000000 ? 2 : 3;
+            updatingOptions = false; UpdateFormat();
+        }
+        private void SetOptionsEnabled(bool enabled) { preferences.Enabled = displayPicker.Enabled = preset.Enabled = sessionName.Enabled = enabled; }
+        private async void RefreshRecent()
+        {
+            int generation = ++libraryGeneration; string folder = settings.OutputFolder;
+            var sessions = await Task.Run(() => SessionLibrary.Read(folder));
+            if (IsDisposed || generation != libraryGeneration) return;
+            foreach (Control c in recent.Controls.Cast<Control>().ToArray()) c.Dispose();
+            foreach (var item in sessions.Take(2)) { var card = new SessionCard(item, true); card.Scale(new SizeF(DeviceDpi / 96f, DeviceDpi / 96f)); recent.Controls.Add(card); }
+            if (sessions.Count == 0) { var empty = Theme.Label("No sessions yet", 10, FontStyle.Regular); empty.ForeColor = Theme.Muted; empty.Margin = new Padding(0, 20, 0, 0); recent.Controls.Add(empty); }
+            latestSession = sessions.FirstOrDefault(s => File.Exists(Path.Combine(s.Folder, "Review.html")))?.Folder;
+            review.Enabled = latestSession != null;
+        }
         private void UpdateFormat() { format.Text = String.Format(System.Globalization.CultureInfo.InvariantCulture, "{0} fps   ·   {1} px   ·   {2:0.#} Mbps{3}", settings.Fps, settings.MaxDimension, settings.Bitrate / 1000000.0, settings.WorkflowEvents ? "   ·   Annotated" : ""); }
         private void SaveSettings() { try { Json.Save(settingsPath, settings); } catch (Exception e) { ShowError("Could not save settings: " + e.Message); } }
         private void BeginRecording()
         {
             try {
-                Screen display = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == settings.Monitor) ?? Screen.PrimaryScreen; settings.Monitor = display.DeviceName; settings.Validate(); Json.Save(settingsPath, settings);
+                Screen display = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == settings.Monitor) ?? Screen.PrimaryScreen; settings.Monitor = display.DeviceName; settings.SessionName = sessionName.Text; settings.Validate(); Json.Save(settingsPath, settings);
                 if (settings.WorkflowEvents) InstallMouseHook();
-                recorder = new Recorder(settings, display.Bounds); handledEnd = false; recorder.Start(); preferences.Enabled = false; record.Text = "Stop"; state.Text = "Starting"; pause.Enabled = true;
+                recorder = new Recorder(settings, display.Bounds); handledEnd = false; recorder.Start(); SetOptionsEnabled(false); record.Text = "Stop recording"; state.Text = "Starting"; pause.Enabled = true;
                 using (Process p = Process.GetCurrentProcess()) lastCpu = p.TotalProcessorTime; lastCpuAt = DateTime.UtcNow;
             } catch (Exception e) { RemoveHook(); ShowError(e.Message); }
         }
@@ -88,9 +165,9 @@ namespace Afterimage
             if (recorder == null) return;
             if (recorder.SessionFolder != null) latestSession = recorder.SessionFolder;
             review.Enabled = latestSession != null && File.Exists(Path.Combine(latestSession, "Review.html"));
-            elapsed.Text = TimeSpan.FromSeconds(recorder.RecordedSeconds).ToString(@"hh\:mm\:ss");
+            elapsed.Text = SessionLibrary.Duration(recorder.RecordedSeconds, true);
             if (!recorder.IsAlive && !handledEnd) {
-                handledEnd = true; RemoveHook(); preferences.Enabled = record.Enabled = true; record.Text = "Record"; pause.Enabled = marker.Enabled = false; pause.Text = "Pause"; state.Text = recorder.Error == null ? "Saved" : "Error"; state.ForeColor = recorder.Error == null ? Theme.Muted : Color.Firebrick; tray.Icon = idleIcon; tray.Text = "Afterimage · stopped";
+                handledEnd = true; RemoveHook(); SetOptionsEnabled(true); record.Enabled = true; record.Text = "Record"; pause.Enabled = marker.Enabled = false; pause.Text = "Pause"; state.Text = recorder.Error == null ? "Saved" : "Error"; state.ForeColor = recorder.Error == null ? Theme.Muted : Color.Firebrick; tray.Icon = idleIcon; tray.Text = "Afterimage · stopped"; RefreshRecent();
                 if (recorder.Error != null) ShowError(recorder.Error); else if (recorder.StopReason != null && recorder.StopReason.StartsWith("Stopped:")) ShowError(recorder.StopReason);
                 if (exitRequested) { Close(); return; }
             } else if (recorder.IsAlive) {
@@ -101,7 +178,7 @@ namespace Afterimage
             using (Process p = Process.GetCurrentProcess()) {
                 DateTime now = DateTime.UtcNow; double cpu = Math.Max(0, (p.TotalProcessorTime - lastCpu).TotalSeconds / Math.Max(.1, (now - lastCpuAt).TotalSeconds) / Environment.ProcessorCount * 100);
                 lastCpu = p.TotalProcessorTime; lastCpuAt = now; resources.Text = String.Format("{0:0}% CPU · {1:0} MB", cpu, p.WorkingSet64 / 1048576.0);
-                tips.SetToolTip(resources, String.Format("{0:N0} frames · {1} clips · {2:0.00} GB in folder", recorder.Frames, recorder.SegmentCount, recorder.Bytes / 1073741824.0));
+                tips.SetToolTip(resources, String.Format("{0} · {1:N0} frames · {2} clips · {3:0.00} GB in folder", recorder.CaptureBackend, recorder.Frames, recorder.SegmentCount, recorder.Bytes / 1073741824.0));
             }
         }
         private void InstallMouseHook()
@@ -139,29 +216,30 @@ namespace Afterimage
     internal sealed class SettingsForm : Form
     {
         internal Settings Result;
-        private readonly ComboBox monitor = new ComboBox(), size = new ComboBox(), bitrate = new ComboBox();
+        private readonly ComboBox monitor = new ComboBox(), size = new ComboBox(), bitrate = new ComboBox(), capture = new ComboBox();
         private readonly NumericUpDown fps = new NumericUpDown(), minutes = new NumericUpDown(), limit = new NumericUpDown(), free = new NumericUpDown();
         private readonly CheckBox cursor = new CheckBox(), annotations = new CheckBox(), titles = new CheckBox(), hardware = new CheckBox(), launch = new CheckBox();
         private readonly TextBox folder = new TextBox();
         private int rowIndex;
         internal SettingsForm(Settings config)
         {
-            SuspendLayout(); AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = AutoScaleMode.Dpi; Font = new Font("Segoe UI", 10); Text = "Settings"; BackColor = Theme.Paper; ForeColor = Theme.Ink; StartPosition = FormStartPosition.CenterParent; ClientSize = new Size(510, 584); FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = MinimizeBox = false;
+            SuspendLayout(); AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = AutoScaleMode.Dpi; Font = new Font("Segoe UI", 10); Text = "Settings"; BackColor = Theme.Paper; ForeColor = Theme.Ink; StartPosition = FormStartPosition.CenterParent; ClientSize = new Size(510, 624); FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = MinimizeBox = false;
             SetupCombo(monitor); foreach (Screen s in Screen.AllScreens) monitor.Items.Add(new DisplayItem(s)); monitor.SelectedIndex = Math.Max(0, Array.FindIndex(Screen.AllScreens, s => s.DeviceName == config.Monitor)); Row("Display", monitor);
             Number(fps, 1, 30, config.Fps); Row("Frame rate", fps);
             SetupCombo(size); size.Items.AddRange(new object[] { "1280 px", "1920 px", "2560 px", "3840 px" }); size.SelectedIndex = Math.Max(0, Array.IndexOf(new int[] { 1280, 1920, 2560, 3840 }, config.MaxDimension)); Row("Longest edge", size);
             SetupCombo(bitrate); bitrate.Items.AddRange(new object[] { "1 Mbps", "2.5 Mbps", "5 Mbps", "10 Mbps" }); bitrate.SelectedIndex = Math.Max(0, Array.IndexOf(new int[] { 1000000, 2500000, 5000000, 10000000 }, config.Bitrate)); Row("Bitrate", bitrate);
+            SetupCombo(capture); capture.Items.AddRange(new object[] { "Automatic · Direct3D 11", "Compatibility" }); capture.SelectedIndex = config.CaptureMode == "compatibility" ? 1 : 0; Row("Capture", capture);
             Number(minutes, 1, 60, Math.Max(1, config.SegmentSeconds / 60)); Row("Clip length · min", minutes);
             Number(limit, 1, 10000, config.MaxStorageGB); Row("Folder limit · GB", limit);
             Number(free, 1, 1000, config.MinFreeGB); Row("Free space · GB", free);
-            folder.Width = 266; folder.Text = config.OutputFolder; Row("Output folder", folder); Button browse = Theme.Button("…", 35, false); browse.SetBounds(441, 300, 35, 28); Controls.Add(browse); browse.Click += delegate { using (FolderBrowserDialog d = new FolderBrowserDialog { SelectedPath = folder.Text }) if (d.ShowDialog() == DialogResult.OK) folder.Text = d.SelectedPath; };
+            folder.Width = 266; folder.Text = config.OutputFolder; Row("Output folder", folder); Button browse = Theme.Button("…", 35, false); browse.AccessibleName = "Choose output folder"; browse.SetBounds(441, 340, 35, 28); Controls.Add(browse); browse.Click += delegate { using (FolderBrowserDialog d = new FolderBrowserDialog { SelectedPath = folder.Text }) if (d.ShowDialog() == DialogResult.OK) folder.Text = d.SelectedPath; };
             Check(cursor, "Mouse pointer", config.Cursor); Check(annotations, "Auto annotations", config.WorkflowEvents); Check(titles, "Include window titles", config.WindowTitles); Check(hardware, "Hardware encoding", config.Hardware); Check(launch, "Record on app launch", config.StartOnLaunch);
             titles.Enabled = annotations.Checked; annotations.CheckedChanged += delegate { titles.Enabled = annotations.Checked; };
-            Label optionLabel = Theme.Label("Options", 10, FontStyle.Regular); optionLabel.Location = new Point(24, 354); Controls.Add(optionLabel);
-            CheckBox[] checks = { cursor, annotations, titles, hardware, launch }; for (int i = 0; i < checks.Length; i++) { checks[i].Location = new Point(166, 350 + i * 28); Controls.Add(checks[i]); }
-            Button save = Theme.Button("Save", 100, true); save.SetBounds(384, 529, 100, 36); Controls.Add(save); AcceptButton = save;
-            Button cancel = Theme.Link("Cancel"); cancel.SetBounds(288, 531, 86, 32); cancel.DialogResult = DialogResult.Cancel; Controls.Add(cancel); CancelButton = cancel;
-            save.Click += delegate { try { Result = new Settings { Monitor = ((DisplayItem)monitor.SelectedItem).Screen.DeviceName, Fps = (int)fps.Value, MaxDimension = new int[] { 1280, 1920, 2560, 3840 }[size.SelectedIndex], Bitrate = new int[] { 1000000, 2500000, 5000000, 10000000 }[bitrate.SelectedIndex], SegmentSeconds = (int)minutes.Value * 60, MaxStorageGB = (int)limit.Value, MinFreeGB = (int)free.Value, OutputFolder = folder.Text, Cursor = cursor.Checked, WorkflowEvents = annotations.Checked, WindowTitles = annotations.Checked && titles.Checked, Hardware = hardware.Checked, StartOnLaunch = launch.Checked }; Result.Validate(); DialogResult = DialogResult.OK; } catch (Exception e) { MessageBox.Show(this, e.Message, "Settings"); } };
+            Label optionLabel = Theme.Label("Options", 10, FontStyle.Regular); optionLabel.Location = new Point(24, 394); Controls.Add(optionLabel);
+            CheckBox[] checks = { cursor, annotations, titles, hardware, launch }; for (int i = 0; i < checks.Length; i++) { checks[i].Location = new Point(166, 390 + i * 28); Controls.Add(checks[i]); }
+            Button save = Theme.Button("Save", 100, true); save.SetBounds(384, 569, 100, 36); Controls.Add(save); AcceptButton = save;
+            Button cancel = Theme.Link("Cancel"); cancel.SetBounds(288, 571, 86, 32); cancel.DialogResult = DialogResult.Cancel; Controls.Add(cancel); CancelButton = cancel;
+            save.Click += delegate { try { Result = new Settings { CaptureMode = capture.SelectedIndex == 1 ? "compatibility" : "auto", SessionName = config.SessionName, Monitor = ((DisplayItem)monitor.SelectedItem).Screen.DeviceName, Fps = (int)fps.Value, MaxDimension = new int[] { 1280, 1920, 2560, 3840 }[size.SelectedIndex], Bitrate = new int[] { 1000000, 2500000, 5000000, 10000000 }[bitrate.SelectedIndex], SegmentSeconds = (int)minutes.Value * 60, MaxStorageGB = (int)limit.Value, MinFreeGB = (int)free.Value, OutputFolder = folder.Text, Cursor = cursor.Checked, WorkflowEvents = annotations.Checked, WindowTitles = annotations.Checked && titles.Checked, Hardware = hardware.Checked, StartOnLaunch = launch.Checked }; Result.Validate(); DialogResult = DialogResult.OK; } catch (Exception e) { MessageBox.Show(this, e.Message, "Settings"); } };
             ResumeLayout(true);
         }
         private void SetupCombo(ComboBox c) { c.DropDownStyle = ComboBoxStyle.DropDownList; c.Width = 308; c.Margin = new Padding(0, 0, 0, 12); }

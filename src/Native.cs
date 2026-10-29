@@ -59,55 +59,6 @@ namespace Afterimage
             } catch { t.Dispose(); throw; }
         }
     }
-    internal sealed class VideoWriter : IDisposable
-    {
-        private Com writer;
-        private int stream, bytes;
-        private MF.Sample write;
-        internal VideoWriter(string path, int width, int height, int fps, int bitrate, bool hardware)
-        {
-            bytes = checked(width * height * 4);
-            IntPtr p; MF.Check(MF.MFCreateAttributes(out p, 3));
-            try {
-                using (Com attributes = new Com(p)) {
-                    attributes.U32("a634a91c-822b-41b9-a494-4de4643612b0", hardware ? 1 : 0);
-                    // Keep default sink throttling: back-pressure bounds encoder memory during long runs.
-                    attributes.U32("9c27891a-ed7a-40e1-88e8-b22727a024ee", 1); // MF_LOW_LATENCY
-                    MF.Check(MF.MFCreateSinkWriterFromURL(path, IntPtr.Zero, attributes.P, out p)); writer = new Com(p);
-                }
-                using (Com output = MF.MediaType(width, height, fps, true, bitrate))
-                    MF.Check(writer.Fn<MF.AddStream>(3)(writer.P, output.P, out stream));
-                using (Com input = MF.MediaType(width, height, fps, false, bitrate))
-                    MF.Check(writer.Fn<MF.InputType>(4)(writer.P, stream, input.P, IntPtr.Zero));
-                MF.Check(writer.Fn<MF.Simple>(5)(writer.P));
-                write = writer.Fn<MF.Sample>(6);
-            } catch { if (writer != null) { writer.Dispose(); writer = null; } throw; }
-        }
-        internal void Write(IntPtr pixels, long time100ns, long duration100ns)
-        {
-            IntPtr p; MF.Check(MF.MFCreateMemoryBuffer(bytes, out p));
-            using (Com buffer = new Com(p)) {
-                IntPtr data; int max, length;
-                MF.Check(buffer.Fn<MF.LockBuffer>(3)(buffer.P, out data, out max, out length));
-                try { MF.Copy(data, pixels, (UIntPtr)(uint)bytes); }
-                finally { MF.Check(buffer.Fn<MF.Simple>(4)(buffer.P)); }
-                MF.Check(buffer.Fn<MF.SetLength>(6)(buffer.P, bytes));
-                MF.Check(MF.MFCreateSample(out p));
-                using (Com sample = new Com(p)) {
-                    MF.Check(sample.Fn<MF.AddBuffer>(42)(sample.P, buffer.P));
-                    MF.Check(sample.Fn<MF.SetTime>(36)(sample.P, time100ns));
-                    MF.Check(sample.Fn<MF.SetTime>(38)(sample.P, duration100ns));
-                    MF.Check(write(writer.P, stream, sample.P));
-                }
-            }
-        }
-        public void Dispose()
-        {
-            if (writer == null) return;
-            Com w = writer; writer = null;
-            try { MF.Check(w.Fn<MF.Simple>(11)(w.P)); } finally { w.Dispose(); }
-        }
-    }
     internal static class Win
     {
         [StructLayout(LayoutKind.Sequential)] internal struct Point { internal int X, Y; }
@@ -124,6 +75,7 @@ namespace Afterimage
         [DllImport("gdi32.dll")] internal static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
         [DllImport("gdi32.dll")] internal static extern IntPtr CreateDIBSection(IntPtr dc, ref BitmapInfo info, uint usage, out IntPtr bits, IntPtr section, uint offset);
         [DllImport("gdi32.dll")] internal static extern bool StretchBlt(IntPtr dc, int x, int y, int w, int h, IntPtr source, int sx, int sy, int sw, int sh, uint rop);
+        [DllImport("gdi32.dll")] internal static extern int StretchDIBits(IntPtr dc, int x, int y, int w, int h, int sx, int sy, int sw, int sh, IntPtr bits, ref BitmapInfo info, uint usage, uint rop);
         [DllImport("gdi32.dll")] internal static extern int SetStretchBltMode(IntPtr dc, int mode);
         [DllImport("gdi32.dll")] internal static extern bool SetBrushOrgEx(IntPtr dc, int x, int y, IntPtr old);
         [DllImport("user32.dll")] internal static extern bool GetCursorInfo(ref CursorInfo info);
@@ -146,11 +98,14 @@ namespace Afterimage
     }
     internal sealed class ScreenCapture : IDisposable
     {
+        private DesktopCapture desktop;
+        internal string Backend { get; private set; } = "Compatibility";
+        internal string FallbackReason { get; private set; }
         private IntPtr screen, dc, bitmap, old;
         internal IntPtr Pixels;
         internal readonly Rectangle Bounds;
         internal readonly int Width, Height;
-        internal ScreenCapture(Rectangle bounds, int maxDimension)
+        internal ScreenCapture(Rectangle bounds, int maxDimension, bool direct3d = false)
         {
             Bounds = bounds;
             double scale = Math.Min(1.0, (double)maxDimension / Math.Max(bounds.Width, bounds.Height));
@@ -161,12 +116,19 @@ namespace Afterimage
                 bitmap = Win.CreateDIBSection(screen, ref info, 0, out Pixels, IntPtr.Zero, 0);
                 if (screen == IntPtr.Zero || dc == IntPtr.Zero || bitmap == IntPtr.Zero) throw new Win32Exception("Could not allocate the screen capture buffer.");
                 old = Win.SelectObject(dc, bitmap); Win.SetStretchBltMode(dc, 4); Win.SetBrushOrgEx(dc, 0, 0, IntPtr.Zero);
+                if (direct3d) try { desktop = new DesktopCapture(bounds); } catch (Exception e) { FallbackReason = e.Message; }
             } catch { Dispose(); throw; }
         }
         internal void Capture(bool cursor)
         {
-            if (!Win.StretchBlt(dc, 0, 0, Width, Height, screen, Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height, 0x40CC0020)) throw new Win32Exception("Screen capture failed. The display may have changed or become unavailable.");
-            if (!cursor) return;
+            bool copied = false, drawPointer = cursor;
+            if (desktop != null) {
+                try { copied = desktop.CopyTo(dc, Width, Height); if (copied) drawPointer = cursor && desktop.PointerSeparate; }
+                catch (Exception e) { FallbackReason = e.Message; desktop.Dispose(); desktop = null; }
+            }
+            Backend = copied ? "Direct3D 11" : "Compatibility";
+            if (!copied && !Win.StretchBlt(dc, 0, 0, Width, Height, screen, Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height, 0x40CC0020)) throw new Win32Exception("Screen capture failed. The display may have changed or become unavailable.");
+            if (!drawPointer) return;
             Win.CursorInfo ci = new Win.CursorInfo { Size = Marshal.SizeOf(typeof(Win.CursorInfo)) };
             if (!Win.GetCursorInfo(ref ci) || ci.Flags != 1 || !Bounds.Contains(ci.Position.X, ci.Position.Y)) return;
             Win.IconInfo ii;
@@ -185,6 +147,13 @@ namespace Afterimage
                 using (Font f = new Font("Segoe UI", 28)) g.DrawString("TOP · " + frame, f, Brushes.Black, Width / 2 + 30, 30);
             }
         }
-        public void Dispose() { if (dc != IntPtr.Zero && old != IntPtr.Zero) Win.SelectObject(dc, old); if (bitmap != IntPtr.Zero) Win.DeleteObject(bitmap); if (dc != IntPtr.Zero) Win.DeleteDC(dc); if (screen != IntPtr.Zero) Win.ReleaseDC(IntPtr.Zero, screen); bitmap = dc = screen = old = IntPtr.Zero; }
+        internal void SaveThumbnail(string path)
+        {
+            using var source = new Bitmap(Width, Height, Width * 4, System.Drawing.Imaging.PixelFormat.Format32bppRgb, Pixels);
+            using var thumbnail = new Bitmap(384, Math.Max(1, Height * 384 / Width));
+            using (var g = Graphics.FromImage(thumbnail)) { g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic; g.DrawImage(source, 0, 0, thumbnail.Width, thumbnail.Height); }
+            thumbnail.Save(path, System.Drawing.Imaging.ImageFormat.Jpeg);
+        }
+        public void Dispose() { desktop?.Dispose(); desktop = null; if (dc != IntPtr.Zero && old != IntPtr.Zero) Win.SelectObject(dc, old); if (bitmap != IntPtr.Zero) Win.DeleteObject(bitmap); if (dc != IntPtr.Zero) Win.DeleteDC(dc); if (screen != IntPtr.Zero) Win.ReleaseDC(IntPtr.Zero, screen); bitmap = dc = screen = old = IntPtr.Zero; }
     }
 }

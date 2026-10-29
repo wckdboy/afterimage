@@ -7,7 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
-using System.Web.Script.Serialization;
+using System.Text.Json;
 
 namespace Afterimage
 {
@@ -26,10 +26,14 @@ namespace Afterimage
         public bool WindowTitles { get; set; }
         public bool Hardware { get; set; }
         public bool StartOnLaunch { get; set; }
+        public string CaptureMode { get; set; } = "auto";
+        public string SessionName { get; set; } = "";
         internal bool TestPattern;
         public Settings() { OutputFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Recordings"); Fps = 5; MaxDimension = 1920; Bitrate = 2500000; SegmentSeconds = 300; MaxStorageGB = 100; MinFreeGB = 2; Cursor = true; Hardware = true; WorkflowEvents = true; }
         internal void Validate()
         {
+            if (CaptureMode != "auto" && CaptureMode != "compatibility") CaptureMode = "auto";
+            SessionName = (SessionName ?? "").Trim(); if (SessionName.Length > 160) SessionName = SessionName.Substring(0, 160);
             if (Fps < 1 || Fps > 30 || MaxDimension < 320 || MaxDimension > 3840 || Bitrate < 250000 || Bitrate > 20000000 || SegmentSeconds < 1 || SegmentSeconds > 3600 || MaxStorageGB < 1 || MinFreeGB < 1)
                 throw new ArgumentException("Recording settings are outside their supported range.");
             OutputFolder = Path.GetFullPath(OutputFolder);
@@ -39,14 +43,15 @@ namespace Afterimage
     }
     internal static class Json
     {
-        internal static string Encode(object value) { return new JavaScriptSerializer().Serialize(value); }
+        private static readonly JsonSerializerOptions options = new JsonSerializerOptions { IncludeFields = true };
+        internal static string Encode(object value) { return JsonSerializer.Serialize(value, options); }
         internal static void Save(string path, object value)
         {
             string temp = path + ".tmp";
             File.WriteAllText(temp, Encode(value), new UTF8Encoding(false));
             if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
         }
-        internal static Settings Load(string path) { try { if (File.Exists(path)) { Settings s = new JavaScriptSerializer().Deserialize<Settings>(File.ReadAllText(path)); s.Validate(); return s; } } catch { } return new Settings(); }
+        internal static Settings Load(string path) { try { if (File.Exists(path)) { Settings s = JsonSerializer.Deserialize<Settings>(File.ReadAllText(path)); s.Validate(); return s; } } catch { } return new Settings(); }
     }
     internal sealed class Recorder
     {
@@ -54,6 +59,7 @@ namespace Afterimage
         internal readonly Rectangle Bounds;
         internal string SessionFolder { get; private set; }
         internal volatile string State = "Starting";
+        internal volatile string CaptureBackend = "Starting";
         internal string Error { get; private set; }
         internal string StopReason { get; private set; }
         internal long Frames { get { return Interlocked.Read(ref frames); } }
@@ -177,6 +183,7 @@ namespace Afterimage
             Json.Save(Path.Combine(SessionFolder, "session.json"), new {
                 schema_version = 1, application = "Afterimage", status = state,
                 started_utc = startUtc.ToString("o"), elapsed_seconds = Math.Round(clock.Elapsed.TotalSeconds, 3),
+                name = Config.SessionName, recorded_seconds = Math.Round(RecordedSeconds, 3), capture_backend = CaptureBackend,
                 frames = Frames, segments = segmentIndex, stop_reason = StopReason, error = Error,
                 capture_bounds = new { x = Bounds.X, y = Bounds.Y, width = Bounds.Width, height = Bounds.Height },
                 settings = Config, timing = "Each submitted capture includes elapsed_ms, UTC and requested video_time_ms. Codec timestamps may be quantized to the frame rate. Pauses contain no captures."
@@ -197,7 +204,7 @@ namespace Afterimage
                 events = new StreamWriter(Path.Combine(SessionFolder, "events.jsonl"), false, new UTF8Encoding(false), 16384);
                 frameLog = new StreamWriter(Path.Combine(SessionFolder, "frames.jsonl"), false, new UTF8Encoding(false), 32768);
                 startUtc = DateTime.UtcNow; clock.Start(); SaveSession("recording");
-                using (ScreenCapture capture = new ScreenCapture(Bounds, Config.MaxDimension)) {
+                using (ScreenCapture capture = new ScreenCapture(Bounds, Config.MaxDimension, !Config.TestPattern && Config.Cursor && Config.CaptureMode == "auto")) {
                     Log("session_start", "width", capture.Width, "height", capture.Height, "fps", Config.Fps);
                     double next = 0, nextStorage = 0, nextApp = 0, nextFlush = 0;
                     bool wasPaused = false;
@@ -216,6 +223,9 @@ namespace Afterimage
                         // Display changes invalidate the fixed capture coordinates; finish cleanly instead of recording the wrong area.
                         if (!System.Windows.Forms.Screen.AllScreens.Any(s => s.DeviceName == Config.Monitor && s.Bounds == Bounds)) throw new IOException("Display layout changed. Select the display again and start a new session.");
                         if (Config.TestPattern) capture.DrawTestPattern((int)Frames); else capture.Capture(Config.Cursor);
+                        string backend = Config.TestPattern ? "Test pattern" : capture.Backend;
+                        if (CaptureBackend != backend) { CaptureBackend = backend; Log("capture_backend", "backend", backend, "fallback_reason", capture.FallbackReason); }
+                        if (Frames == 0) try { capture.SaveThumbnail(Path.Combine(SessionFolder, "thumbnail.jpg")); } catch (Exception e) { Log("thumbnail_unavailable", "reason", e.Message); }
                         double capturedAt = clock.Elapsed.TotalMilliseconds;
                         if (segmentStart < 0) { segmentStart = capturedAt; annotations.Begin(segmentStart); lastWindow = IntPtr.Zero; Log("segment_opened", "file", segmentName, "start_elapsed_ms", Math.Round(segmentStart, 3), "hardware_allowed", segmentHardware); }
                         double pts = capturedAt - segmentStart;

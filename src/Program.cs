@@ -8,6 +8,7 @@ namespace Afterimage
     {
         [STAThread] private static int Main(string[] args)
         {
+            Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
             if (args.Length > 0 && args[0] == "--self-test") return SelfTest.Run(args);
             if (args.Length > 1 && args[0] == "--validate") return Validation.Run(args[1]);
