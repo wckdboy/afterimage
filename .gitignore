@@ -1,0 +1,32 @@
+# Local preferences and secrets
+/settings.json
+/.env
+/.env.*
+!.env.example
+*.user
+*.suo
+.vs/
+
+# Recordings, annotations, and diagnostics
+Recordings/
+TestRecordings/
+session-*/
+*.mp4
+*.srt
+*.jsonl
+*.annotations.json
+*.first-frame.png
+*.review.html
+Review.html
+session.json
+validation.json
+test-result.json
+
+# Generated builds and packages
+*.exe
+*.pdb
+*.zip
+*.tmp
+bin/
+obj/
+artifacts/
