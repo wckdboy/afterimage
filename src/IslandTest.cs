@@ -49,6 +49,7 @@ namespace Afterimage
                     Snapshot(island, output, "recording");
                     pause.PerformClick(); await Until(() => main.RecordingState == "Paused");
                     Check(pause.Text == "Resume", "Pause did not expose Resume."); Snapshot(island, output, "paused");
+                    main.Show(); await Until(() => main.CompletedReviewAvailable); main.Hide();
                     pause.PerformClick(); await Until(() => island.AccessibleDescription.StartsWith("Recording")); await Task.Delay(1000);
                     stop.PerformClick(); await Until(() => island.AccessibleDescription.StartsWith("Saved"));
                     Check(record.Enabled && pause.Text == "Chat" && stop.Text == "Notes", "Stopped controls are incorrect.");

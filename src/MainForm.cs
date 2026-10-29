@@ -87,6 +87,9 @@ namespace Afterimage
         private DateTime lastCpuAt = DateTime.UtcNow;
         private DateTime markedUntil;
         internal string RecordingState => recorder?.State;
+        internal bool CompletedReviewAvailable => review.Enabled;
+        private bool checkingReview;
+        private DateTime reviewCheckedAt;
         internal MainForm(Settings initial = null, bool preview = false)
         {
             SuspendLayout();
@@ -207,7 +210,8 @@ namespace Afterimage
         {
             island?.RefreshState();
             if (recorder == null) return;
-            if (recorder.SessionFolder != null) latestSession = recorder.SessionFolder;
+            if (recorder.SessionFolder != null && latestSession != recorder.SessionFolder) { latestSession = recorder.SessionFolder; review.Enabled = false; reviewCheckedAt = DateTime.MinValue; }
+            if (Visible && !checkingReview && (DateTime.UtcNow - reviewCheckedAt).TotalSeconds >= 1) RefreshReviewAvailability();
             elapsed.Text = SessionLibrary.Duration(recorder.RecordedSeconds, true);
             if (!recorder.IsAlive && !handledEnd) {
                 handledEnd = true; ticker.Interval = 1000; RemoveHook(); SetOptionsEnabled(true); record.Enabled = true; record.Text = "Record"; pause.Enabled = marker.Enabled = false; pause.Text = "Pause"; state.Text = recorder.Error == null ? "Saved" : "Error"; state.ForeColor = recorder.Error == null ? Theme.Muted : Color.Firebrick; tray.Icon = idleIcon; tray.Text = "Afterimage · stopped"; RefreshRecent();
@@ -225,6 +229,14 @@ namespace Afterimage
                 lastCpu = p.TotalProcessorTime; lastCpuAt = now; resources.Text = String.Format("{0:0}% CPU · {1:0} MB", cpu, p.WorkingSet64 / 1048576.0);
                 tips.SetToolTip(resources, String.Format("{0} · {1:N0} frames · {2} clips · {3:0.00} GB in folder", recorder.CaptureBackend, recorder.Frames, recorder.SegmentCount, recorder.Bytes / 1073741824.0));
             }
+        }
+        private async void RefreshReviewAvailability()
+        {
+            string folder = latestSession; checkingReview = true; reviewCheckedAt = DateTime.UtcNow;
+            try {
+                bool available = folder != null && await Task.Run(() => File.Exists(Path.Combine(folder, "Review.html")));
+                if (!IsDisposed && latestSession == folder) review.Enabled = available;
+            } finally { checkingReview = false; }
         }
         private void InstallMouseHook()
         {
